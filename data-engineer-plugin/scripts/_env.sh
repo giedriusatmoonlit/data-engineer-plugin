@@ -117,13 +117,18 @@ worktree_path_for_pr() {
 # Alias for readability in callers that think in "PR worktree" terms.
 pr_worktree()     { worktree_path_for_pr "$1"; }
 
-# Per-PR notes live INSIDE the worktree. These four resolvers compose
-# from worktree_path_for_pr.
+# Per-PR notes live INSIDE the worktree. Per-MF tracking lives in
+# state.json (structured: .categorized_comments + .decisions). Only two
+# human-readable files remain:
+#   - pr_packet.json  cached az response, for --refresh diffing
+#   - handoff.md      phase-3 takeover sheet for the developer
+#
+# (Earlier versions wrote comments.md + plan.md too. Both are now in
+# state.json as structured data and the model presents per-MF blocks
+# directly in chat — no markdown file to maintain mid-flight.)
 pr_dir()          { echo "$(worktree_path_for_pr "$1")/.notes"; }
 pr_state_file()   { echo "$(pr_dir "$1")/state.json"; }
 pr_packet_file()  { echo "$(pr_dir "$1")/pr_packet.json"; }
-pr_comments_md()  { echo "$(pr_dir "$1")/comments.md"; }
-pr_plan_md()      { echo "$(pr_dir "$1")/plan.md"; }
 pr_handoff_md()   { echo "$(pr_dir "$1")/handoff.md"; }
 
 # Batch metadata stays under DATA_ENG_WORK_ROOT — it spans multiple PRs

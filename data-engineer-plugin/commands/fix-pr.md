@@ -82,128 +82,156 @@ time — it's the same shape, so they scan it in under 2 seconds.
 
 ### Phase 0 → 1  TRIAGE
 
-If you're here, `/address-pr` did not complete triage for this PR.
-Run the **`address-pr-comments`** skill inline (its SKILL.md has the
-canonical rules + ADO API calls). It will:
+Every spawned pane self-triages on its first turn — the master
+`/address-pr` doesn't pre-fetch anything. Run the **`address-pr-comments`**
+skill inline. It will:
 
-- Fetch `az repos pr show` + `list-comments`
-- Cache the JSON to `.notes/pr_packet.json` (relative to the worktree)
-- Categorize every comment: `MF-N` (must-fix), `NIT-N` (nit),
-  `Q-N` (question), `RESOLVED` (thread already closed/fixed)
-- Write `comments.md` with checkbox status: `- [ ] MF-1 file.py:42 · @reviewer · ...`
-- Write `plan.md` — ordered action list (which files first, why)
-- Populate `state.json` fields: `pr_id`, `pr_url`, `source_branch`,
-  `target_branch`, `head_sha_at_triage`, `must_fix_total`,
-  `nits_total`, `questions_total`, `ticket_id` (if parsed)
+- Fetch `az repos pr show` + `list-comments` + threads
+- Cache the JSON to `.notes/pr_packet.json` (used by `--refresh` for diffing)
+- Categorize every comment in memory: `must-fix` / `nit` / `question` /
+  `resolved` (rules in the skill)
+- Write the categorization as structured data into `.notes/state.json`:
+  ```json
+  {
+    "categorized_comments": [
+      {"id": "MF-1", "kind": "must-fix", "thread_id": "12345",
+       "file_path": "Scrapers/NO/...", "line": 128, "reviewer": "@alice",
+       "comment_excerpt": "DST watermark...", "thread_url": "...",
+       "relevant_skills": ["api-scraper:scraper-rules", ...]},
+      ...
+    ],
+    "decisions": []
+  }
+  ```
+- Populate the canonical fields: `pr_id`, `pr_url`, `pr_title`,
+  `source_branch`, `target_branch`, `head_sha_at_triage`, `ticket_id`
+  (parsed DAT-NNN if found), `must_fix_total`, `nits_total`,
+  `questions_total`, `last_known_vote`, `comments_fetched_at`
+
+**No markdown files** written this phase. The per-MF presentation
+happens in chat during ADDRESS — no `comments.md` / `plan.md` to keep
+in sync with state.
 
 Then:
 ```bash
 bash $CLAUDE_PLUGIN_ROOT/scripts/pr-stage-complete.sh <PR_ID>
 ```
 
-### Phase 1 → 2  ADDRESS  (consultative loop — propose, ask, apply)
+### Phase 1 → 2  ADDRESS  (consultative loop — present in chat, dev decides, you apply)
 
-You are **not** an autonomous fixer in this phase. You are a reviewer's
-collaborator. For every MF (and non-trivial NIT), present the plan and
-get the developer's nod before touching code. This dramatically cuts
-review round-trips compared to "guess what the reviewer meant, edit,
-commit".
+You are **not** an autonomous fixer. You are a reviewer's collaborator.
+For every MF (and non-trivial NIT), present the proposal in chat and
+get the developer's nod before touching code. The chat IS the
+conversation; there is no plan.md / comments.md to maintain.
 
 #### Per-MF loop
 
-Walk `plan.md`'s MF blocks in the order they appear. For each `MF-N`:
+Read `.notes/state.json`'s `categorized_comments` array and
+`decisions` array. For each `MF-N` in `categorized_comments` (in array
+order) whose `id` is **not yet in** `decisions[].mf_id`:
 
-1. **Print the MF block from plan.md verbatim** — reviewer intent, code
-   excerpt, relevant skills, **Proposed approach**, **Open question**.
-   The developer should see this *before* any code change.
+1. **Read the entry** from state.json (it has comment_excerpt,
+   file_path, line, reviewer, thread_url, relevant_skills).
 
-2. **Read the listed skills**. For each `<plugin>:<skill-name>` in the
-   "Relevant skills" line, resolve the path:
+2. **Read the listed skills**. For each `<plugin>:<skill-name>` in
+   `relevant_skills`, resolve via:
    ```bash
    ls $HOME/.claude-work/plugins/cache/<plugin>/<plugin>/*/skills/<skill-name>/SKILL.md
    ```
-   Read each match. If the file isn't there, print a soft warning
-   (`skill <name> not installed — proceeding without that domain
-   knowledge`) and continue. **Do not** invent the skill's content.
+   Read each match. If missing: print a soft warning and continue
+   without that domain knowledge.
 
-3. **Ask the developer**, one short prompt. The five options are:
-   - `approve` — apply the Proposed approach as written
-   - `different: <description>` — apply something else the dev describes
-     (the description goes verbatim under the MF in comments.md as a
-     `Dev note:` line for audit)
-   - `skip` — defer this MF. Marked in comments.md with a `Deferred:`
-     note. Does NOT bump `must_fix_addressed`. The Phase 1→2 gate will
-     refuse to advance until either it's done or moved to a follow-up
-     issue.
-   - `show alternatives` — you propose 2–3 alternative approaches,
-     terse, then re-ask
-   - `show related code` — you Read more files the change touches and
-     print a one-paragraph map, then re-ask
+3. **Print the MF block in chat**:
+   - The comment excerpt + file:line + reviewer
+   - The code region around file:line (3-10 lines, Read'd inline)
+   - Your **proposed approach** — one paragraph, concrete
+   - Open question if there's genuine ambiguity
 
-   If the dev responds with anything else, interpret as `different:
-   <their text>`.
+4. **Ask the dev**, one short prompt. Five options:
+   - `approve` — apply the proposed approach
+   - `different: <text>` — apply what the dev describes; their `<text>`
+     becomes the `dev_note` on the decision
+   - `skip` — defer this MF; counter does NOT bump; gate refuses Phase 2
+     until either resolved or removed from `categorized_comments`
+   - `show alternatives` — propose 2-3 terse alternatives, then re-ask
+   - `show related code` — Read more files, print a one-paragraph map,
+     then re-ask
 
-   **Shortcut**: if the dev's first message in the phase is
-   `approve all` (or `auto`), skip the per-MF prompts and apply every
-   Proposed approach autonomously. Surface only the Open question items
-   for confirmation. Use this for plans the dev has already read end to
-   end.
+   If the dev says anything else, interpret as `different: <their text>`.
 
-4. **Apply the approved approach** (your own or the dev's override):
-   - Stay inside the worktree (`state.worktree_path`). `session-guard`
-     rejects writes outside it.
-   - For each edited file, follow the conventions in the skills you
-     just read — naming, imports, structure. Don't re-derive from
-     scratch what the skill already specifies.
+   **Shortcut**: if the dev's first message in the phase is `approve
+   all` or `auto`, skip the per-MF prompts and apply every proposed
+   approach autonomously. Still surface Open Question items for explicit
+   confirmation. Useful when the dev has read your proposals end-to-end
+   in chat already.
 
-5. **Record + commit**:
-   - Append to `comments.md` under the MF item:
-     - `Dev note: <verbatim dev text>` if they overrode
-     - `Applied: <one-line summary>` always
-   - Mark the checkbox: `- [ ] MF-N` → `- [x] MF-N`
-   - Bump `state.must_fix_addressed` by 1 (use `pr_state_update` from
-     `_env.sh`)
-   - Commit. One commit per MF unless the dev explicitly asks to
-     group:
-     ```bash
-     git -C "$WORKTREE" add <files>
-     git -C "$WORKTREE" commit -m "review: address MF-N (<short>)"
-     ```
+5. **Apply the approved approach** (yours or the dev's override). Stay
+   inside the worktree. Follow conventions from the skills you just read.
 
-6. **If `skip`**: append `Deferred: <dev reason or 'no reason given'>`
-   under the MF in comments.md, leave the checkbox `[ ]`. Do NOT bump
-   the counter. Move on to the next MF.
+6. **Commit + record the decision**:
+   ```bash
+   git -C "$WORKTREE" add <files>
+   git -C "$WORKTREE" commit -m "review: address MF-N (<short>)"
+   ```
+   Then append to `state.decisions[]` (atomic — use `pr_state_update`):
+   ```json
+   {
+     "mf_id": "MF-1",
+     "action": "applied",
+     "commit_sha": "abc123",
+     "applied_summary": "Converted to UTC via pendulum",
+     "dev_note": "<verbatim if overridden, else omit>",
+     "decided_at": "<iso>"
+   }
+   ```
+   Bump `state.must_fix_addressed` by 1 in the same `jq` expression.
+
+7. **If `skip`**: append a `"deferred"` decision instead, with
+   `deferred_reason`:
+   ```json
+   {"mf_id": "MF-1", "action": "deferred", "deferred_reason": "...", "decided_at": "..."}
+   ```
+   Do NOT bump `must_fix_addressed`. The gate will refuse Phase 2 until
+   the deferred items are addressed OR removed from `categorized_comments`
+   (the dev's choice — if they decide it's not actually a blocker, edit
+   state.json to drop it).
 
 #### Nits
 
-Same consultative loop, but the prompt is just `approve` / `skip`
-(no alternatives flow — nits don't need debate). Approved nits get
-committed too. Skipped nits don't gate.
+Same loop, prompt is just `approve` / `skip` (no alternatives — nits
+don't need debate). Approved nits get committed + a decision with
+`kind: "nit"`. Skipped nits don't gate.
 
 #### Questions (Q-N)
 
-**Never autonomously code-change for a question.** They become reply
-text. Walk the Q section of plan.md and for each `Q-N`:
+**Never code-change for a question.** They become reply text:
+
 - Show the draft reply
 - Ask: `approve / rewrite: <text> / skip`
-- Record the dev's chosen reply text in comments.md under the Q
-- (The actual reply happens at HANDOFF; you only collect text here)
+- Append a decision: `{kind: "question", q_id, reply_text, decided_at}`
+- The actual reply happens at HANDOFF (dev pastes on ADO); you only
+  collect text here.
+
+#### Audit trail
+
+The chat history IS the audit trail. State.decisions[] is the structured
+log — every applied/deferred MF, every question reply, with timestamps
+and commit SHAs. handoff.md (built at Phase 3) renders this human-readable.
 
 #### Gate
 
-When all MFs are `[x]` or `Deferred:`-tagged (with at least one of each
-of MF resolved), comments.md has no unchecked `^- \[ \] MF-` lines, the
-worktree is clean, and there's at least one new commit since
-`state.head_sha_at_triage`:
+When every MF in `categorized_comments` has a corresponding entry in
+`decisions[]` (action="applied" or "deferred"),
+`must_fix_addressed == must_fix_total`, the worktree is clean, and at
+least one new commit exists since `head_sha_at_triage`:
 
 ```bash
 bash $CLAUDE_PLUGIN_ROOT/scripts/pr-stage-complete.sh <PR_ID>
 ```
 
-The gate will refuse to advance if `must_fix_addressed < must_fix_total`,
-which is exactly what you want when items were deferred — you'll either
-have to come back to them or convert them into follow-up issues before
-shipping this round.
+The gate refuses to advance if any MF is undecided OR if
+`must_fix_addressed < must_fix_total` (= some MFs were deferred but not
+removed from `categorized_comments`).
 
 ### Phase 2 → 3  HANDOFF
 

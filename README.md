@@ -108,11 +108,12 @@ gitignored via `.git/info/exclude` so they never leak into commits.
 ├── Scrapers/                            # the code
 ├── Pipelines/
 └── .notes/                              # per-PR scratchpad (gitignored)
-    ├── state.json                       # phase, counters, head_sha_at_triage
-    ├── pr_packet.json                   # cached az response
-    ├── comments.md                      # MF-/NIT-/Q- with checkbox status
-    ├── plan.md                          # per-MF: Proposed approach + Open question
+    ├── state.json                       # everything structured: pr metadata +
+    │                                    #   categorized_comments[] (MFs/NITs/Qs) +
+    │                                    #   decisions[] (per-MF action log)
+    ├── pr_packet.json                   # cached az response (for --refresh diff)
     └── handoff.md                       # phase-3 output for the developer
+                                         #   (rendered from state.decisions[])
 
 $DATA_ENG_WORK_ROOT/                     # batch-level + session-level only
 ├── pr_notes/

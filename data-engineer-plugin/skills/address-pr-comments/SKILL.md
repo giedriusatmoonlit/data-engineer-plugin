@@ -144,7 +144,60 @@ so the gate forces an explicit decision.
 
 ---
 
-## Step 3: Write `comments.md`
+## Step 3: Write structured categorization into `state.json`
+
+**No markdown files are written this phase.** Categorization lands in
+`state.json` as a `categorized_comments` array — structured data the
+ADDRESS phase walks programmatically and the model presents in chat
+one MF at a time.
+
+For every actionable thread (status=active, not `resolved`), append an
+object to `state.categorized_comments` shaped like:
+
+```json
+{
+  "id": "MF-1",
+  "kind": "must-fix",
+  "thread_id": "12345",
+  "file_path": "Scrapers/NO/NOLOVDAT_basic.py",
+  "line": 128,
+  "reviewer": "@alice",
+  "comment_excerpt": "The watermark check uses naive datetime comparison; will silently skip rows during DST transitions.",
+  "thread_url": "https://dev.azure.com/.../pullrequest/2299?discussionId=12345",
+  "relevant_skills": ["api-scraper:scraper-rules", "api-scraper:scraper-basic"]
+}
+```
+
+Format rules:
+
+- `id` is `MF-N` / `NIT-N` / `Q-N` with persistent numbering — once
+  issued, never renumber. On `--refresh`, new comments get fresh IDs
+  continuing the sequence.
+- `kind` is one of `must-fix`, `nit`, `question`.
+- `comment_excerpt` is a paraphrase or short quote — enough to know
+  what the reviewer wants without diving into pr_packet.json.
+- `relevant_skills` is the cross-plugin skill list for ADDRESS to read
+  before editing (see "File-pattern → skill suggestions" below).
+- Resolved threads (`status=fixed`/`closed`/`wontFix`/`byDesign`) are
+  **omitted** from `categorized_comments` — they don't need action.
+  Optionally record them in a `resolved_threads` array if you want the
+  handoff to mention "X threads were already resolved".
+
+Counters must match: `must_fix_total = count(kind=must-fix)`,
+similarly for nits and questions. `pr-stage-complete.sh` verifies this
+when gating Phase 0 → 1.
+
+---
+
+## Step 3 (legacy reference): comments.md format
+
+(Removed. Earlier versions of this skill wrote `comments.md` and
+`plan.md` as human-readable markdown. The structured `categorized_comments`
+array replaces both — the chat history is the human-readable presentation
+during ADDRESS, and state.json is the structured truth for resume.)
+
+<details>
+<summary>What we used to write (no longer applicable)</summary>
 
 Format:
 
@@ -327,7 +380,11 @@ The plan is human-editable. The model writes the first draft; the
 developer may reorder, rewrite proposed approaches, or strike MFs
 before fix-pr starts ADDRESSing.
 
-### Skill-discovery for cross-plugin references
+</details>
+
+---
+
+## Step 4: Skill-discovery for cross-plugin references
 
 Skills listed as `<plugin>:<skill-name>` (e.g. `api-scraper:scraper-rules`)
 are resolved by fix-pr's ADDRESS phase via the same convention Claude
@@ -359,7 +416,11 @@ and the model proceeds with general engineering judgment.
 
 ---
 
-## Step 5: Write `state.json`
+## Step 5: Populate `state.json`
+
+`launch-pr-batch.sh` writes a minimal initial state.json when the
+worktree is created. TRIAGE fills in the rest in the same atomic update
+that writes `categorized_comments`:
 
 ```json
 {
@@ -373,7 +434,7 @@ and the model proceeds with general engineering judgment.
   "source_branch": "feat/nolovdat-scraper",
   "target_branch": "master",
   "head_sha_at_triage": "1468371d...",
-  "worktree_path": null,
+  "worktree_path": "/home/.../Databricks-pr-2299",
   "phase": 0,
   "phase_name": "fresh",
   "batch_id": "PB-2026-05-11-01",
@@ -381,17 +442,55 @@ and the model proceeds with general engineering judgment.
   "must_fix_total": 3,
   "must_fix_addressed": 0,
   "nits_total": 2,
-  "nits_addressed": 0,
   "questions_total": 1,
-  "questions_answered": 0,
   "awaiting_human": false,
-  "last_known_vote": "waitForAuthor"
+  "last_known_vote": "waitForAuthor",
+
+  "categorized_comments": [
+    {
+      "id": "MF-1", "kind": "must-fix", "thread_id": "12345",
+      "file_path": "Scrapers/NO/NOLOVDAT_basic.py", "line": 128,
+      "reviewer": "@alice",
+      "comment_excerpt": "DST watermark uses naive datetime; will silently skip rows.",
+      "thread_url": "https://dev.azure.com/.../?discussionId=12345",
+      "relevant_skills": ["api-scraper:scraper-rules", "api-scraper:scraper-basic"]
+    },
+    { "id": "MF-2", "kind": "must-fix", "...": "..." },
+    { "id": "MF-3", "kind": "must-fix", "...": "..." },
+    { "id": "NIT-1", "kind": "nit", "...": "..." },
+    { "id": "NIT-2", "kind": "nit", "...": "..." },
+    { "id": "Q-1",  "kind": "question", "...": "..." }
+  ],
+
+  "decisions": []
 }
 ```
 
-`worktree_path` stays null until `launch-pr-batch.sh` runs (it owns
-worktree creation). `phase` becomes 1 after `pr-stage-complete.sh`
-gates this triage as complete.
+`decisions[]` is empty at end of TRIAGE — ADDRESS appends to it as each
+MF is decided. Each decision shape:
+
+```json
+{ "mf_id": "MF-1", "action": "applied",
+  "commit_sha": "abc1234", "applied_summary": "Converted to UTC via pendulum",
+  "dev_note": "do both sides, normalize source",
+  "decided_at": "2026-05-11T16:30:00Z" }
+```
+
+or:
+
+```json
+{ "mf_id": "MF-2", "action": "deferred",
+  "deferred_reason": "needs schema migration first; follow-up DAT-700",
+  "decided_at": "..." }
+```
+
+or for a question:
+
+```json
+{ "q_id": "Q-1", "action": "answered",
+  "reply_text": "7-day default occasionally misses week-spanning publishes...",
+  "decided_at": "..." }
+```
 
 ---
 
@@ -399,22 +498,27 @@ gates this triage as complete.
 
 When `/address-pr --refresh` or `/fix-pr --refresh` runs:
 
-1. Re-fetch `az repos pr show` + threads
-2. Diff against existing `pr_packet.json`:
-   - Threads with new replies → check status; if reviewer added MUST-FIX
-     reply on an existing thread, add a `**NEW reply on MF-N:**` line
-     under that item (don't issue a new MF-N — same thread)
-   - Threads created since triage → issue new IDs continuing sequence,
-     prefix `**NEW:**`, default `[ ]`
-   - Threads now status=fixed/closed → move to Resolved section,
-     mark `✓ ~~...~~`
-3. If PR's `head_sha` changed since triage:
-   - Add to top of comments.md:
-     ```
-     ⚠ Head SHA changed: <old>...<new> — reviewer or you pushed since triage.
-     Run: git -C <worktree> log <old>..<new> --oneline   to see what.
-     ```
+1. Re-fetch `az repos pr show` + threads → new pr_packet.json content
+2. Diff against the cached `pr_packet.json` and update `state.categorized_comments`:
+   - **Threads with new replies** but already in categorized_comments →
+     update `comment_excerpt` to mention the new reply (e.g. prepend
+     `"[NEW reply from @reviewer] "`), don't issue a new id
+   - **Threads created since last fetch** → append new entries to
+     `categorized_comments` with fresh ids continuing the sequence
+     (MF-4, MF-5, ...). Bump corresponding counters
+     (`must_fix_total`, etc.).
+   - **Threads now status=fixed/closed** → remove them from
+     `categorized_comments` and add a note to a sibling
+     `resolved_threads[]` array (id + thread_url) for the handoff.
+3. `decisions[]` is preserved untouched — never lose dev-confirmed work.
+4. If PR's `head_sha` changed since triage (someone pushed):
+   - Set `state.head_sha_drift = {old: ..., new: ..., detected_at: ...}`
+   - Surface in pr-status: "⚠ Head SHA drift — reviewer or someone
+     pushed; run `git -C <worktree> log <old>..<new> --oneline` to see"
    - Don't auto-reset the worktree.
+5. Update `comments_fetched_at` to the new fetch timestamp.
+
+Everything is structured-state diffing — no markdown to reconcile.
 
 ---
 

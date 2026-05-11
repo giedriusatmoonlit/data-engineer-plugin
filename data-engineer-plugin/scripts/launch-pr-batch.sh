@@ -356,7 +356,9 @@ for PR_ID in "${PRS[@]}"; do
           batch_id:$bid, launched_at:$ts,
           must_fix_total:0, must_fix_addressed:0,
           nits_total:0, questions_total:0,
-          awaiting_human:false}' > "$STATE_FILE"
+          awaiting_human:false,
+          categorized_comments:[],
+          decisions:[]}' > "$STATE_FILE"
     green "  .notes/state.json initialized (phase 0)"
   else
     # State already exists (e.g. re-launch). Just refresh worktree_path

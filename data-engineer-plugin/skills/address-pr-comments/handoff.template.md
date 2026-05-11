@@ -3,6 +3,9 @@
 > Phase 3 reached. fix-pr's work is done. Below is everything you need
 > to push + close out the review round. fix-pr never pushes and never
 > replies to ADO threads on your behalf — that's deliberate.
+>
+> Source of truth for all of this: `.notes/state.json` (the
+> `decisions[]` array). This handoff is just the human-readable render.
 
 PR URL:        {{PR_URL}}
 Source branch: {{SOURCE_BRANCH}} → {{TARGET_BRANCH}}

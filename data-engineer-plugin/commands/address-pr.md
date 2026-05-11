@@ -10,10 +10,15 @@ Bulk PR onboarding for ADO PRs. Light orchestrator: for every input
 PR, creates a fresh worktree at `<repo>-pr-NNNN` and spawns a
 claude-squad session in it. Each spawned session then **self-triages**
 as Phase 0→1 of `/data-engineer-plugin:fix-pr` — fetches via `az`,
-categorizes comments, writes `.notes/{state.json, pr_packet.json,
-comments.md, plan.md}` *inside its own worktree*.
+categorizes comments in memory, writes `.notes/pr_packet.json` (the az
+cache) and structured arrays into `.notes/state.json`.
 
-Per-PR notes live in `<worktree>/.notes/` — no external path to chase.
+Per-PR notes live in `<worktree>/.notes/`. Only two files: `state.json`
+(structured: pr metadata + `categorized_comments[]` + `decisions[]`)
+and `pr_packet.json` (raw az for `--refresh` diffing). Plus `handoff.md`
+written at Phase 3. **No** `comments.md` / `plan.md` — the per-MF
+conversation lives in chat.
+
 Batch metadata (which spans multiple PRs) stays at
 `$DATA_ENG_WORK_ROOT/pr_notes/_batch/<BATCH_ID>/`.
 
@@ -46,7 +51,7 @@ Optional flags:
 
 | Phase | Done by             | What | Gate                          |
 |-------|---------------------|------|-------------------------------|
-| 0→1   | this command        | TRIAGE: pr_packet.json, comments.md, plan.md | every comment categorized |
+| 0→1   | spawned pane (not this command) | TRIAGE: pr_packet.json + state.categorized_comments[] | every active thread categorized |
 | 1→2   | /fix-pr in cs pane  | ADDRESS: edits + commits in worktree | all MFs `[x]`, tree clean, new commits |
 | 2→3   | /fix-pr in cs pane  | HANDOFF: handoff.md for the developer | handoff.md non-empty |
 
@@ -135,13 +140,17 @@ Re-render the table from existing `batch.json`. No diagnosis, no fan-out.
 
 Re-run `az repos pr show` + `list-comments` for every PR in the batch.
 Diff against the cached `pr_packet.json`:
-- New comments → append to `comments.md` as `NEW:` items (preserving
-  existing checkbox state on items already there)
-- Resolved threads → mark `RESOLVED` in `comments.md`
+- New comments → append fresh entries to `state.categorized_comments`
+  with new ids (continuing the sequence MF-4, MF-5, ...)
+- Resolved threads (since last fetch) → remove from
+  `categorized_comments` and record in `resolved_threads[]`
+- Existing threads with new replies → update `comment_excerpt` to
+  prepend "[NEW reply from @reviewer]"; preserve any decision already
+  in `decisions[]` (don't re-ask the dev about settled MFs)
 - Push-since-triage detection: if the PR's `head_sha` differs from
-  `state.head_sha_at_triage`, surface this — the reviewer or you may
-  have pushed since triage; the developer needs to decide whether to
-  rebase the worktree or accept the divergence.
+  `state.head_sha_at_triage`, set `state.head_sha_drift` — the
+  developer needs to decide whether to rebase the worktree or accept
+  the divergence.
 
 ### `--launch <BATCH_ID>`
 

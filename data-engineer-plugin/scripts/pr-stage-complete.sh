@@ -89,14 +89,29 @@ check_state_field() {
 # ── per-phase exit gates ─────────────────────────────────────────────────────
 case "$FROM" in
   0)
+    # TRIAGE done: pr_packet.json cached; state.json has all the
+    # canonical fields populated AND a categorized_comments array
+    # listing every MF/NIT/Q the model intends to address.
     check_file_nonempty "$PR_DIR/pr_packet.json" "pr_packet.json"
-    check_file_nonempty "$PR_DIR/comments.md"    "comments.md"
-    check_file_nonempty "$PR_DIR/plan.md"        "plan.md"
     check_state_field   '.pr_id'                 "pr_id"
     check_state_field   '.pr_url'                "pr_url"
     check_state_field   '.source_branch'         "source_branch"
     check_state_field   '.head_sha_at_triage'    "head_sha_at_triage"
     check_state_field   '.must_fix_total'        "must_fix_total"
+    # categorized_comments[] must exist (may be empty for a PR with
+    # nothing actionable, but the array MUST be present + reflect the
+    # counters).
+    CC_LEN=$(jq -r '.categorized_comments | length // 0' "$STATE" 2>/dev/null || echo 0)
+    if [ "$CC_LEN" = "null" ] || [ -z "$CC_LEN" ]; then
+      FAILS=$((FAILS+1)); FAIL_MSGS+=("state.categorized_comments missing — triage didn't write it")
+    fi
+    # Counters must match the categorized array (sanity check).
+    MF_EXPECT=$(jq -r '.must_fix_total // 0' "$STATE")
+    MF_IN_ARRAY=$(jq -r '[.categorized_comments[] | select(.kind == "must-fix")] | length' "$STATE" 2>/dev/null || echo 0)
+    if [ "$MF_EXPECT" != "$MF_IN_ARRAY" ]; then
+      FAILS=$((FAILS+1))
+      FAIL_MSGS+=("must_fix_total ($MF_EXPECT) doesn't match categorized_comments[kind=must-fix] count ($MF_IN_ARRAY)")
+    fi
     ;;
   1)
     check_state_field '.worktree_path' "worktree_path"
@@ -108,14 +123,17 @@ case "$FROM" in
     DONE=$(jq -r  '.must_fix_addressed // 0' "$STATE")
     if [ "$DONE" -lt "$TOTAL" ]; then
       FAILS=$((FAILS+1))
-      FAIL_MSGS+=("must_fix_addressed ($DONE) < must_fix_total ($TOTAL) — finish the remaining items in comments.md")
+      FAIL_MSGS+=("must_fix_addressed ($DONE) < must_fix_total ($TOTAL) — finish the remaining items")
     fi
-    if [ -f "$PR_DIR/comments.md" ]; then
-      OPEN_MF=$(grep -cE '^- \[ \] MF-' "$PR_DIR/comments.md" 2>/dev/null || echo 0)
-      if [ "$OPEN_MF" -gt 0 ]; then
-        FAILS=$((FAILS+1))
-        FAIL_MSGS+=("comments.md still has $OPEN_MF unchecked must-fix item(s)")
-      fi
+    # Every MF in categorized_comments must have a decision (applied or deferred).
+    UNDECIDED=$(jq -r '
+      (.categorized_comments // []) as $cc |
+      (.decisions // []) as $dec |
+      [$cc[] | select(.kind == "must-fix") | .id] - [$dec[] | .mf_id] | length
+    ' "$STATE" 2>/dev/null || echo 0)
+    if [ "$UNDECIDED" -gt 0 ]; then
+      FAILS=$((FAILS+1))
+      FAIL_MSGS+=("$UNDECIDED must-fix item(s) have no decision in state.decisions[]")
     fi
     if [ -n "$WT" ] && [ -d "$WT" ]; then
       TRIAGE_SHA=$(jq -r '.head_sha_at_triage // empty' "$STATE")
@@ -145,37 +163,52 @@ next_phase_guide() {
   case "$from" in
     0)
       cat <<'EOF'
-NEXT — Phase 1 (TRIAGE): fetch and categorize PR comments.
+NEXT — Phase 1 (TRIAGE): fetch + categorize PR comments into state.json.
   • Apply the address-pr-comments skill (SKILL.md has the full recipe)
   • Fetch the PR with az:
       az repos pr show         --id <N> --output json
       az repos pr list-comments --id <N> --output json
-    Combine into .notes/pr_packet.json (relative to the worktree)
-  • Produce in <worktree>/.notes/:
-      pr_packet.json    raw ADO response (cached for re-fetch diffing)
-      comments.md       categorized: '- [ ] MF-N ...' must-fix /
-                        '- [ ] NIT-N ...' nit / '- [ ] Q-N ...' question
-      plan.md           per-MF blocks with Proposed approach + Open question
-  • Set in .notes/state.json:
-      pr_id, pr_url, source_branch, head_sha_at_triage, must_fix_total
+    Combine into .notes/pr_packet.json
+  • Categorize threads in memory (MF / NIT / Q / RESOLVED). For each
+    actionable thread, append an object to .notes/state.json under
+    .categorized_comments with:
+      { id: "MF-1" | "NIT-1" | "Q-1",
+        kind: "must-fix" | "nit" | "question",
+        thread_id, file_path, line, reviewer, comment_excerpt, thread_url,
+        relevant_skills: ["api-scraper:scraper-rules", ...] }
+  • Also set state.json: pr_id, pr_url, source_branch, target_branch,
+    head_sha_at_triage, ticket_id (parsed DAT-NNN if found),
+    must_fix_total, nits_total, questions_total, last_known_vote,
+    comments_fetched_at, decisions: []
+  • NO markdown files written. The model presents per-MF blocks
+    directly in chat during ADDRESS.
   • Re-run: bash $CLAUDE_PLUGIN_ROOT/scripts/pr-stage-complete.sh <PR_ID>
 EOF
       ;;
     1)
       cat <<'EOF'
-NEXT — Phase 2 (ADDRESS): consultative loop — propose, ask, apply.
-  • Walk .notes/plan.md one MF at a time
-  • For each MF-N:
-      1. Print the plan.md block (reviewer intent + code + Proposed approach)
-      2. Read each skill listed under "Relevant skills" (cross-plugin)
+NEXT — Phase 2 (ADDRESS): consultative loop, in-chat.
+  • Walk state.categorized_comments[] one MF at a time (in array order)
+  • Skip MFs that already appear in state.decisions[] (resume safe)
+  • For each undecided MF:
+      1. Print the MF block in chat: comment_excerpt, file:line, reviewer,
+         your proposed approach (1 paragraph), open question if any
+      2. Read each skill in .relevant_skills (cross-plugin, e.g.
+         api-scraper:scraper-rules). Resolve via:
+            ls $HOME/.claude-work/plugins/cache/<plugin>/<plugin>/*/skills/<name>/SKILL.md
       3. Ask dev: approve / different: <text> / skip / show-alternatives
+         / show-related-code
       4. On approve: edit in worktree → commit ("review: address MF-N (...)")
-                     → append 'Applied: ...' line to comments.md
-                     → mark '- [x] MF-N'
-                     → bump state.must_fix_addressed
-  • Worktree must end clean (git status --porcelain empty)
-  • NEW commits must exist since state.head_sha_at_triage
-  • Nits = same loop (approve/skip only). Questions = reply text only.
+         → append a decision object to state.decisions[]:
+            { mf_id, action: "applied", commit_sha, applied_summary,
+              dev_note?: <text if overridden>, decided_at }
+         → bump state.must_fix_addressed
+      5. On skip: append { mf_id, action: "deferred", deferred_reason, decided_at }
+         Does NOT bump must_fix_addressed → gate refuses to advance until
+         either applied or removed from .categorized_comments
+  • Worktree must end clean. NEW commits required since head_sha_at_triage.
+  • Nits = same loop (approve/skip only). Questions = reply text only —
+    add to state.decisions as { kind:"question", reply_text, decided_at }.
   • Re-run: bash $CLAUDE_PLUGIN_ROOT/scripts/pr-stage-complete.sh <PR_ID>
 EOF
       ;;

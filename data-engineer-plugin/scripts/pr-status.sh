@@ -130,17 +130,23 @@ printf "  Questions:  %2d open\n"             "$Q_TOTAL"
 echo
 
 # ── top unaddressed MFs ───────────────────────────────────────────────────────
-if [ "$BRIEF" -eq 0 ] && [ -f "$PR_DIR/comments.md" ]; then
-  TOP_MF=$(grep -E '^- \[ \] \*\*MF-' "$PR_DIR/comments.md" 2>/dev/null | head -3)
+# Read from state.categorized_comments, filtered against state.decisions.
+# An MF is "unaddressed" when it's in categorized_comments[kind=must-fix]
+# and NOT in decisions[mf_id].
+if [ "$BRIEF" -eq 0 ]; then
+  TOP_MF=$(jq -r '
+    (.categorized_comments // []) as $cc |
+    (.decisions // []) as $dec |
+    ($dec | map(.mf_id)) as $done_ids |
+    $cc[] | select(.kind == "must-fix") | select(.id as $id | $done_ids | index($id) | not) |
+    "  \(.id)  \(.file_path)\(if .line then ":\(.line)" else "" end)\(if .reviewer then " · \(.reviewer)" else "" end)"
+  ' "$STATE" 2>/dev/null | head -3)
   if [ -n "$TOP_MF" ]; then
+    REMAINING=$((MF_TOTAL - MF_DONE))
     echo "$HR_THIN"
-    echo "  Unaddressed must-fix (top 3 of $((MF_TOTAL - MF_DONE)) remaining)"
+    echo "  Unaddressed must-fix (top 3 of $REMAINING remaining)"
     echo "$HR_THIN"
-    while IFS= read -r line; do
-      # Strip the markdown checkbox prefix; keep MF-N + the rest.
-      cleaned=$(echo "$line" | sed -E 's/^- \[ \] \*\*(MF-[0-9]+)\*\* · /  \1  /; s/`//g')
-      echo "$cleaned"
-    done <<< "$TOP_MF"
+    echo "$TOP_MF"
     echo
   fi
 fi
@@ -156,32 +162,34 @@ case "$PHASE" in
     echo "    bash \$CLAUDE_PLUGIN_ROOT/scripts/pr-stage-complete.sh $PR_ID"
     ;;
   1)
-    # Find the first unchecked MF + its proposed approach (if plan.md has one).
-    NEXT_MF=""
-    NEXT_FILE=""
-    if [ -f "$PR_DIR/comments.md" ]; then
-      NEXT_MF=$(grep -m1 -E '^- \[ \] \*\*MF-' "$PR_DIR/comments.md" 2>/dev/null \
-        | sed -E 's/^- \[ \] \*\*(MF-[0-9]+)\*\*.*/\1/')
-    fi
-    if [ -n "$NEXT_MF" ] && [ -f "$PR_DIR/plan.md" ]; then
-      NEXT_FILE=$(grep -m1 -E "^## .*$NEXT_MF\b" "$PR_DIR/plan.md" 2>/dev/null \
-        | sed -E "s/^## [0-9. ]*$NEXT_MF +[—-]+ +//")
-    fi
-    echo "  Consultative ADDRESS loop — propose to dev, then apply on approval."
-    if [ -n "$NEXT_MF" ]; then
-      echo "    Next:  $NEXT_MF${NEXT_FILE:+  ·  $NEXT_FILE}"
-      echo "    1. Print $NEXT_MF block from .notes/plan.md (reviewer intent, code, proposed approach)"
-      echo "    2. Read each skill listed under 'Relevant skills'"
-      echo "    3. Ask dev:  approve / different / skip / show-alternatives / show-related-code"
-      echo "    4. On approve → edit in worktree → commit → mark [x] → bump counter"
-      echo "    Dev can say 'approve all' at the start to fall through to autonomous mode."
+    # Find the first MF in categorized_comments that has no decision yet.
+    NEXT=$(jq -c '
+      (.categorized_comments // []) as $cc |
+      (.decisions // []) as $dec |
+      ($dec | map(.mf_id)) as $done_ids |
+      [$cc[] | select(.kind == "must-fix") | select(.id as $id | $done_ids | index($id) | not)] |
+      first // empty
+    ' "$STATE" 2>/dev/null)
+    echo "  Consultative ADDRESS loop — present in chat, dev decides, you apply."
+    if [ -n "$NEXT" ] && [ "$NEXT" != "null" ]; then
+      NEXT_ID=$(jq -r '.id // empty' <<<"$NEXT")
+      NEXT_FILE=$(jq -r '.file_path // empty' <<<"$NEXT")
+      NEXT_LINE=$(jq -r '.line // empty' <<<"$NEXT")
+      NEXT_EXCERPT=$(jq -r '.comment_excerpt // empty' <<<"$NEXT" | head -c 90)
+      echo "    Next:  $NEXT_ID  ·  $NEXT_FILE${NEXT_LINE:+:$NEXT_LINE}"
+      [ -n "$NEXT_EXCERPT" ] && echo "           “$NEXT_EXCERPT…”"
+      echo "    1. Read state.categorized_comments[] entry for $NEXT_ID"
+      echo "    2. Read each skill listed under .relevant_skills (cross-plugin OK)"
+      echo "    3. Print MF block in chat (excerpt + file:line + proposed approach)"
+      echo "    4. Ask dev:  approve / different / skip / show-alternatives / show-related-code"
+      echo "    5. On approve → edit in worktree → commit → append to state.decisions"
+      echo "       → bump state.must_fix_addressed"
+      echo "    Dev can say 'approve all' at start to fall through to autonomous mode."
     else
-      echo "    All MFs resolved or no MFs in plan."
+      echo "    All MFs decided. Run the gate to advance to HANDOFF."
     fi
-    echo "    Files (relative to this worktree):"
-    echo "      .notes/plan.md       proposals (per-MF approach + open questions)"
-    echo "      .notes/comments.md   audit trail (Dev notes, Applied lines, checkboxes)"
-    echo "      <other files>        the code you're editing"
+    echo "    State (jq-readable):"
+    echo "      .notes/state.json   .categorized_comments  /  .decisions"
     echo "    Gate:  bash \$CLAUDE_PLUGIN_ROOT/scripts/pr-stage-complete.sh $PR_ID"
     ;;
   2)
