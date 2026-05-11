@@ -147,6 +147,37 @@ case "$FROM" in
         FAILS=$((FAILS+1))
         FAIL_MSGS+=("worktree has $DIRTY uncommitted change(s); commit or discard before completing ADDRESS")
       fi
+      # Every applied decision must reference a real commit between triage..HEAD.
+      # This blocks the failure mode where the model fabricates decisions in
+      # one synthetic burst without actually committing the work.
+      if [ -n "$TRIAGE_SHA" ] && [ -n "$CURR_SHA" ] && [ "$TRIAGE_SHA" != "$CURR_SHA" ]; then
+        # Real SHAs landed since triage. Build a set of them for membership tests.
+        REAL_SHAS=$(git -C "$WT" rev-list "$TRIAGE_SHA..HEAD" 2>/dev/null || echo "")
+        # For each applied decision, check its commit_sha is present AND non-empty.
+        BAD=$(jq -r '
+          (.decisions // [])
+          | map(select(.action == "applied"))
+          | map(select((.commit_sha // "") == "") | .mf_id) as $missing
+          | [.[] | .commit_sha // empty] as $declared
+          | {missing: $missing, declared: $declared}
+          | @json
+        ' "$STATE" 2>/dev/null)
+        MISSING=$(jq -r '.missing // [] | length' <<<"$BAD" 2>/dev/null || echo 0)
+        if [ "${MISSING:-0}" -gt 0 ]; then
+          MIDS=$(jq -r '.missing | join(", ")' <<<"$BAD")
+          FAILS=$((FAILS+1))
+          FAIL_MSGS+=("applied decision(s) with no commit_sha: $MIDS — every applied MF must record the real commit it landed in")
+        fi
+        # Check each declared commit_sha actually exists in triage..HEAD.
+        while IFS= read -r sha; do
+          [ -z "$sha" ] && continue
+          if ! grep -q "^$sha\$" <<<"$REAL_SHAS"; then
+            MID=$(jq -r --arg s "$sha" '.decisions[] | select(.commit_sha == $s) | .mf_id' "$STATE" 2>/dev/null | head -1)
+            FAILS=$((FAILS+1))
+            FAIL_MSGS+=("decision $MID claims commit_sha=$sha, but that SHA isn't in $TRIAGE_SHA..HEAD — fabricated or wrong worktree?")
+          fi
+        done < <(jq -r '.decisions[]? | select(.action == "applied") | .commit_sha // empty' "$STATE" 2>/dev/null)
+      fi
     fi
     ;;
   2)

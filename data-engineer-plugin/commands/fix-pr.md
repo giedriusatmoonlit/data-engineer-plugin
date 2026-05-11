@@ -119,16 +119,57 @@ bash $CLAUDE_PLUGIN_ROOT/scripts/pr-stage-complete.sh <PR_ID>
 
 ### Phase 1 → 2  ADDRESS  (consultative loop — present in chat, dev decides, you apply)
 
-You are **not** an autonomous fixer. You are a reviewer's collaborator.
-For every MF (and non-trivial NIT), present the proposal in chat and
-get the developer's nod before touching code. The chat IS the
+You are **not** an autonomous fixer. You are the developer's collaborator
+defending their code against a reviewer who may be wrong, partially
+right, or asking for something not worth the cost. The chat IS the
 conversation; there is no plan.md / comments.md to maintain.
+
+#### Two hard rules (read before doing anything)
+
+**Rule 1 — No code change without a per-MF dev decision.**
+You may **only** apply (step 5) an MF after the dev has explicitly
+authorized that specific MF in their previous message. Steps 1–4 are
+the presentation + ask. Step 4 ends the turn — full stop. You do not
+proceed to step 5 in the same turn as step 4.
+
+After a step-5 apply + step-6 commit, you may immediately present the
+**next** MF (steps 1–4) in the same turn — this keeps the loop tight.
+But every turn must end at step 4 (a question to the dev) or at the
+phase-2 gate-advance — never with a unilateral jump to HANDOFF or with
+multiple unapproved applies.
+
+The only exception: the dev's first message in the phase is literally
+`approve all` or `auto`. In that case, fall through to autonomous mode
+for the remaining MFs in this phase (still pause for explicit
+confirmation on any Open Question items).
+
+**Anti-pattern to avoid**: reading state.categorized_comments, deciding
+all the MFs are "obviously correct fixes", applying them all, and
+writing handoff.md in one turn. That bypasses Rule 1 and Rule 2 and
+defeats the entire point of the consultative loop. If you find
+yourself about to do this — stop, present the FIRST undecided MF in
+chat, ask the dev, end the turn.
+
+**Rule 2 — The reviewer is not the authority. The dev is.**
+Your "proposed approach" is your own technical assessment, not a
+restatement of the reviewer's comment. Reviewers are sometimes wrong,
+sometimes asking for the wrong thing, sometimes flagging a real issue
+but suggesting a worse fix than what's possible. When you propose an
+approach:
+  - If you agree with the reviewer, say why and propose the concrete change.
+  - If you partially agree, say which part you'd take and which you'd push back on.
+  - If you think the reviewer is wrong, say so explicitly — propose a
+    reply that explains the disagreement, not a code change. The dev
+    chooses whether to argue, concede, or compromise.
+  - Never default to "the reviewer asked for X, so I'll do X". That
+    short-circuits the dev's judgment.
 
 #### Per-MF loop
 
 Read `.notes/state.json`'s `categorized_comments` array and
-`decisions` array. For each `MF-N` in `categorized_comments` (in array
-order) whose `id` is **not yet in** `decisions[].mf_id`:
+`decisions` array. Find the **first** `MF-N` in `categorized_comments`
+(in array order) whose `id` is **not yet in** `decisions[].mf_id`.
+Process **only that one** this turn. Then stop.
 
 1. **Read the entry** from state.json (it has comment_excerpt,
    file_path, line, reviewer, thread_url, relevant_skills).
@@ -144,7 +185,10 @@ order) whose `id` is **not yet in** `decisions[].mf_id`:
 3. **Print the MF block in chat**:
    - The comment excerpt + file:line + reviewer
    - The code region around file:line (3-10 lines, Read'd inline)
-   - Your **proposed approach** — one paragraph, concrete
+   - Your **proposed approach** — one paragraph. Per Rule 2, this is
+     YOUR assessment: agree / partially agree / disagree, with the
+     concrete next action. If disagreeing, propose reply text instead
+     of code.
    - Open question if there's genuine ambiguity
 
 4. **Ask the dev**, one short prompt. Five options:
@@ -159,14 +203,15 @@ order) whose `id` is **not yet in** `decisions[].mf_id`:
 
    If the dev says anything else, interpret as `different: <their text>`.
 
-   **Shortcut**: if the dev's first message in the phase is `approve
-   all` or `auto`, skip the per-MF prompts and apply every proposed
-   approach autonomously. Still surface Open Question items for explicit
-   confirmation. Useful when the dev has read your proposals end-to-end
-   in chat already.
+   **STOP HERE. End the turn.** Do not proceed to step 5 until the dev
+   replies. Do not preview your intended code change. Do not read more
+   files "to be ready." Do not write handoff.md. The next thing that
+   happens is the dev's reply — and nothing else. (Exception:
+   `approve all` / `auto` mode — see Rule 1.)
 
-5. **Apply the approved approach** (yours or the dev's override). Stay
-   inside the worktree. Follow conventions from the skills you just read.
+5. **(Next turn, after dev replies) Apply the approved approach**
+   (yours or the dev's override). Stay inside the worktree. Follow
+   conventions from the skills you just read.
 
 6. **Commit + record the decision**:
    ```bash
