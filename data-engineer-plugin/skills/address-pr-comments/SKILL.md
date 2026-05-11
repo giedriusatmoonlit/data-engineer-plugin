@@ -209,31 +209,149 @@ Format rules:
 
 ## Step 4: Write `plan.md`
 
-Ordered, terse. The plan picks an order that minimizes rework:
+Ordered, with **a per-MF "Proposed approach"** block. fix-pr's ADDRESS
+phase walks this list one MF at a time and presents the proposal to the
+developer *before* editing — the dev approves / overrides / skips each
+one. The plan is therefore not optional advice; it's the script the
+ADDRESS phase reads aloud.
+
+For every MF (and NIT, if non-trivial), produce a block with:
+
+- The reviewer's intent (short paraphrase, not the verbatim quote — that
+  lives in comments.md)
+- The code excerpt the model Read (3–10 lines around the file:line —
+  enough to disambiguate, not so much it bloats the file)
+- Relevant skills the model would consult before editing — point at
+  installed sibling plugins by name (`api-scraper:scraper-rules`,
+  `api-scraper:scraper-basic`, etc.). fix-pr's ADDRESS step will Read
+  these before touching code.
+- A **Proposed approach**: one paragraph, concrete enough that the dev
+  can read it and say "yes" or "no, instead do X"
+- An **Open question for dev** if there's genuine ambiguity. If the
+  question is purely about reply text (not a code decision), put it
+  under the Q section instead.
 
 ```markdown
 # Plan for PR-2299
 
-1. **MF-3** (hardcoded UA) — Scrapers/NO/NOLOVDAT_raw.py:67
-   Cheapest first; isolated change. Use `Common.scraper_headers()`.
+Order of work picks lowest-risk first.
 
-2. **MF-1** (DST watermark) — Scrapers/NO/NOLOVDAT_basic.py:128
-   Convert to UTC. Re-test against the corpus the reviewer flagged.
+## 1. MF-3 — Scrapers/NO/NOLOVDAT_raw.py:67  (hardcoded UA)
 
-3. **MF-2** (dq_expectations) — Pipelines/NO/NOLOVDAT.pipeline.py:42
-   Add nullability check for Title.
+Reviewer intent: replace inline UA string with the shared helper.
 
-Then nits if time:
-4. NIT-1, NIT-2
-
-Q-1 needs a written reply at HANDOFF, not a code change. Draft answer:
-"7-day default occasionally misses week-spanning publishes; bumping to
-14d eliminates that without re-fetching the full corpus. Watermark
-gate still constrains the upper bound."
+Code I read (lines 63–70):
+```python
+headers = {
+    "User-Agent": "Mozilla/5.0 (compatible; moonlit-scraper)",
+    "Accept": "application/json",
+}
 ```
 
-The plan is human-editable. The model writes a first draft; the
-developer may reorder before fix-pr starts ADDRESSing.
+Relevant skills: api-scraper:scraper-rules (§HTTP headers), scraper-raw
+
+Proposed approach:
+  Replace the literal `headers = {...}` with `headers =
+  Common.scraper_headers("NOLOVDAT")`. Import Common.scraper_headers if
+  not already imported (it's a Common/ module, not a notebook helper —
+  see scraper-raw skill for the import pattern). ~3 lines.
+
+Open question for dev: <none — this is mechanical>
+
+## 2. MF-1 — Scrapers/NO/NOLOVDAT_basic.py:128  (DST watermark)
+
+Reviewer intent: naive datetime compare drops rows during DST jumps.
+
+Code I read (lines 124–134):
+```python
+df = df[df["published_at"] > last_run]
+```
+
+Relevant skills: api-scraper:scraper-rules (§watermark),
+                 api-scraper:scraper-basic
+
+Proposed approach:
+  Convert both sides to UTC explicitly via
+  `pendulum.parse(...).in_tz('UTC')` before compare. Keep the column
+  schema unchanged (don't mutate `published_at`'s on-disk type). ~5 lines.
+
+Open question for dev:
+  Do you want me to *also* normalize the source-side `published_at`
+  (write back UTC strings), or only the comparison? Source-side
+  normalization is a separate change; this MF only requires the
+  comparison fix per the reviewer's wording.
+
+## 3. MF-2 — Pipelines/NO/NOLOVDAT.pipeline.py:42  (dq_expectations)
+
+Reviewer intent: add a nullability check for Title.
+
+Code I read (lines 38–48):
+```python
+@dlt.expect_or_drop("title_not_empty", "Title IS NOT NULL")
+```
+
+Relevant skills: api-scraper:pipeline-creator (§dq-expectations),
+                 api-scraper:scraper-rules
+
+Proposed approach:
+  Add `@dlt.expect_or_drop("title_not_null", "Title IS NOT NULL")` next
+  to the existing expects. NULL Titles are a fatal corruption per
+  pipeline-creator §dq.
+
+Open question for dev: <none>
+
+# Nits
+
+## NIT-1 — Scrapers/NO/NOLOVDAT_urls.py:15
+Rename `parse_lst` → `parse_listing` for readability.
+Proposed: do it. Trivial.
+
+## NIT-2 — Migrations/NO/NOLOVDAT.migrate.py:30
+Add docstring to `_normalize_dates`.
+Proposed: do it. Trivial.
+
+# Questions (drafted, dev sends)
+
+## Q-1 — recurrent_window_days=14 rationale
+Draft reply:
+  "7-day default occasionally misses week-spanning publishes; bumping
+  to 14d eliminates that without re-fetching the full corpus. Watermark
+  gate still constrains the upper bound, so no doubled cost."
+```
+
+The plan is human-editable. The model writes the first draft; the
+developer may reorder, rewrite proposed approaches, or strike MFs
+before fix-pr starts ADDRESSing.
+
+### Skill-discovery for cross-plugin references
+
+Skills listed as `<plugin>:<skill-name>` (e.g. `api-scraper:scraper-rules`)
+are resolved by fix-pr's ADDRESS phase via the same convention Claude
+Code uses internally — the plugin cache at
+`$HOME/.claude-work/plugins/cache/<plugin>/<plugin>/<version>/skills/<skill-name>/SKILL.md`
+(the major-version dir is wildcard-globbed). If a referenced skill
+isn't installed, fix-pr surfaces it as a soft warning and the model
+proceeds without that domain knowledge — better to make the change
+imperfectly than to block.
+
+### File-pattern → skill suggestions
+
+When writing the "Relevant skills" line for a given MF's file path,
+follow this default table (extend over time):
+
+| File pattern in worktree         | Suggest skills                                     |
+|----------------------------------|----------------------------------------------------|
+| `Scrapers/*/<P>_basic.py`        | api-scraper:scraper-basic, api-scraper:scraper-rules |
+| `Scrapers/*/<P>_raw.py`          | api-scraper:scraper-raw, api-scraper:scraper-rules   |
+| `Scrapers/*/<P>_urls.py`         | api-scraper:scraper-urls, api-scraper:scraper-rules  |
+| `Migrations/*/<P>.migrate.py`    | api-scraper:scraper-migrate                        |
+| `Pipelines/*/<P>.pipeline.py`    | api-scraper:pipeline-creator, api-scraper:scraper-rules |
+| `databricks.yml`                 | refuse the change — out of scope per scraper-rules |
+| `Common/`, `Migrations/global/`  | refuse the change — out of scope per scraper-rules |
+| (any other repo / generic Python)| none required                                      |
+
+For repos this plugin doesn't recognize, "Relevant skills" reads `none`
+and the model proceeds with general engineering judgment.
 
 ---
 

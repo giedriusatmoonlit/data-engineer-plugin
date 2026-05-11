@@ -156,15 +156,33 @@ case "$PHASE" in
     echo "    bash \$CLAUDE_PLUGIN_ROOT/scripts/pr-stage-complete.sh $PR_ID"
     ;;
   1)
-    if [ -f "$PR_DIR/plan.md" ]; then
-      FIRST_PLAN=$(grep -m1 -E '^\s*[0-9]+\.\s' "$PR_DIR/plan.md" 2>/dev/null | sed 's/^\s*//')
-      [ -n "$FIRST_PLAN" ] && echo "  Per plan.md:  $FIRST_PLAN"
+    # Find the first unchecked MF + its proposed approach (if plan.md has one).
+    NEXT_MF=""
+    NEXT_FILE=""
+    if [ -f "$PR_DIR/comments.md" ]; then
+      NEXT_MF=$(grep -m1 -E '^- \[ \] \*\*MF-' "$PR_DIR/comments.md" 2>/dev/null \
+        | sed -E 's/^- \[ \] \*\*(MF-[0-9]+)\*\*.*/\1/')
     fi
-    echo "  Address must-fix items in order:"
-    echo "    Read $PR_DIR/plan.md"
-    echo "    Read $PR_DIR/comments.md"
-    echo "    Edit in: $WT"
-    echo "    Commit:  git -C $WT commit -m 'review: address MF-N (...)'"
+    if [ -n "$NEXT_MF" ] && [ -f "$PR_DIR/plan.md" ]; then
+      # Pull the one-line summary from the plan.md heading for this MF.
+      NEXT_FILE=$(grep -m1 -E "^## .*$NEXT_MF\b" "$PR_DIR/plan.md" 2>/dev/null \
+        | sed -E "s/^## [0-9. ]*$NEXT_MF +[—-]+ +//")
+    fi
+    echo "  Consultative ADDRESS loop — propose to dev, then apply on approval."
+    if [ -n "$NEXT_MF" ]; then
+      echo "    Next:  $NEXT_MF${NEXT_FILE:+  ·  $NEXT_FILE}"
+      echo "    1. Print $NEXT_MF block from plan.md (reviewer intent, code, proposed approach)"
+      echo "    2. Read each skill listed under 'Relevant skills'"
+      echo "    3. Ask dev:  approve / different / skip / show-alternatives / show-related-code"
+      echo "    4. On approve → edit in worktree → commit → mark [x] → bump counter"
+      echo "    Dev can say 'approve all' at the start to fall through to autonomous mode."
+    else
+      echo "    All MFs resolved or no MFs in plan."
+    fi
+    echo "    Files:"
+    echo "      $PR_DIR/plan.md       proposals (per-MF approach + open questions)"
+    echo "      $PR_DIR/comments.md   audit trail (Dev notes, Applied lines, checkboxes)"
+    echo "      $WT                   worktree (edit here)"
     echo "    Gate:    bash \$CLAUDE_PLUGIN_ROOT/scripts/pr-stage-complete.sh $PR_ID"
     ;;
   2)

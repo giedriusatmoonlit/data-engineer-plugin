@@ -99,32 +99,109 @@ Then:
 bash $CLAUDE_PLUGIN_ROOT/scripts/pr-stage-complete.sh <PR_ID>
 ```
 
-### Phase 1 → 2  ADDRESS
+### Phase 1 → 2  ADDRESS  (consultative loop — propose, ask, apply)
 
-For each `MF-N` block in `comments.md`, in the order `plan.md`
-specifies:
+You are **not** an autonomous fixer in this phase. You are a reviewer's
+collaborator. For every MF (and non-trivial NIT), present the plan and
+get the developer's nod before touching code. This dramatically cuts
+review round-trips compared to "guess what the reviewer meant, edit,
+commit".
 
-1. Re-read the comment + the surrounding code (Read the file:line range
-   the comment points at).
-2. Make the edit. **Stay inside the worktree path** — `session-guard`
-   will reject writes outside it.
-3. Mark the checkbox in `comments.md`: `- [ ] MF-N` → `- [x] MF-N`.
-4. Bump `state.must_fix_addressed` by 1 (atomic state update —
-   `_env.sh` provides `pr_state_update`).
-5. Commit. One commit per MF when reasonable; group only tightly
-   related MFs:
+#### Per-MF loop
+
+Walk `plan.md`'s MF blocks in the order they appear. For each `MF-N`:
+
+1. **Print the MF block from plan.md verbatim** — reviewer intent, code
+   excerpt, relevant skills, **Proposed approach**, **Open question**.
+   The developer should see this *before* any code change.
+
+2. **Read the listed skills**. For each `<plugin>:<skill-name>` in the
+   "Relevant skills" line, resolve the path:
    ```bash
-   git -C "$WORKTREE" add <files>
-   git -C "$WORKTREE" commit -m "review: address MF-N (<short>)"
+   ls $HOME/.claude-work/plugins/cache/<plugin>/<plugin>/*/skills/<skill-name>/SKILL.md
    ```
+   Read each match. If the file isn't there, print a soft warning
+   (`skill <name> not installed — proceeding without that domain
+   knowledge`) and continue. **Do not** invent the skill's content.
 
-Optional: nits + questions. Address what you intend to. Mark `[x]`
-when done; leave `[ ]` when deferred. Nits/Qs are **not gating**.
+3. **Ask the developer**, one short prompt. The five options are:
+   - `approve` — apply the Proposed approach as written
+   - `different: <description>` — apply something else the dev describes
+     (the description goes verbatim under the MF in comments.md as a
+     `Dev note:` line for audit)
+   - `skip` — defer this MF. Marked in comments.md with a `Deferred:`
+     note. Does NOT bump `must_fix_addressed`. The Phase 1→2 gate will
+     refuse to advance until either it's done or moved to a follow-up
+     issue.
+   - `show alternatives` — you propose 2–3 alternative approaches,
+     terse, then re-ask
+   - `show related code` — you Read more files the change touches and
+     print a one-paragraph map, then re-ask
 
-When all MFs are `[x]` and the worktree is clean:
+   If the dev responds with anything else, interpret as `different:
+   <their text>`.
+
+   **Shortcut**: if the dev's first message in the phase is
+   `approve all` (or `auto`), skip the per-MF prompts and apply every
+   Proposed approach autonomously. Surface only the Open question items
+   for confirmation. Use this for plans the dev has already read end to
+   end.
+
+4. **Apply the approved approach** (your own or the dev's override):
+   - Stay inside the worktree (`state.worktree_path`). `session-guard`
+     rejects writes outside it.
+   - For each edited file, follow the conventions in the skills you
+     just read — naming, imports, structure. Don't re-derive from
+     scratch what the skill already specifies.
+
+5. **Record + commit**:
+   - Append to `comments.md` under the MF item:
+     - `Dev note: <verbatim dev text>` if they overrode
+     - `Applied: <one-line summary>` always
+   - Mark the checkbox: `- [ ] MF-N` → `- [x] MF-N`
+   - Bump `state.must_fix_addressed` by 1 (use `pr_state_update` from
+     `_env.sh`)
+   - Commit. One commit per MF unless the dev explicitly asks to
+     group:
+     ```bash
+     git -C "$WORKTREE" add <files>
+     git -C "$WORKTREE" commit -m "review: address MF-N (<short>)"
+     ```
+
+6. **If `skip`**: append `Deferred: <dev reason or 'no reason given'>`
+   under the MF in comments.md, leave the checkbox `[ ]`. Do NOT bump
+   the counter. Move on to the next MF.
+
+#### Nits
+
+Same consultative loop, but the prompt is just `approve` / `skip`
+(no alternatives flow — nits don't need debate). Approved nits get
+committed too. Skipped nits don't gate.
+
+#### Questions (Q-N)
+
+**Never autonomously code-change for a question.** They become reply
+text. Walk the Q section of plan.md and for each `Q-N`:
+- Show the draft reply
+- Ask: `approve / rewrite: <text> / skip`
+- Record the dev's chosen reply text in comments.md under the Q
+- (The actual reply happens at HANDOFF; you only collect text here)
+
+#### Gate
+
+When all MFs are `[x]` or `Deferred:`-tagged (with at least one of each
+of MF resolved), comments.md has no unchecked `^- \[ \] MF-` lines, the
+worktree is clean, and there's at least one new commit since
+`state.head_sha_at_triage`:
+
 ```bash
 bash $CLAUDE_PLUGIN_ROOT/scripts/pr-stage-complete.sh <PR_ID>
 ```
+
+The gate will refuse to advance if `must_fix_addressed < must_fix_total`,
+which is exactly what you want when items were deferred — you'll either
+have to come back to them or convert them into follow-up issues before
+shipping this round.
 
 ### Phase 2 → 3  HANDOFF
 
