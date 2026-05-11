@@ -1,0 +1,9 @@
+# Tooling
+.DS_Store
+*.swp
+__pycache__/
+*.pyc
+
+# Local-only test scratch
+/tmp/
+.session-lock-*.json
