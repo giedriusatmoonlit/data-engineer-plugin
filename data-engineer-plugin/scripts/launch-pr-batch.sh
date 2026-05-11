@@ -229,8 +229,19 @@ for PR_ID in "${PRS[@]}"; do
   if tmux has-session -t "$TMUX_NAME" 2>/dev/null; then
     yellow "  tmux session exists — reusing"
   else
+    # tmux does not inherit arbitrary env vars — every var needed inside
+    # the spawned session must be passed with -e KEY=VAL. Without these,
+    # session-guard.sh dies on `${DATA_ENG_WORK_ROOT:?...}` and bricks
+    # every Bash tool call in the pane.
     tmux new-session -d -s "$TMUX_NAME" -c "$WT_PATH" \
       -e "CLAUDE_CONFIG_DIR=$CLAUDE_CONFIG_DIR_FWD" \
+      -e "DATA_ENG_WORK_ROOT=$DATA_ENG_WORK_ROOT" \
+      -e "DATA_ENG_REPO_ROOT=${DATA_ENG_REPO_ROOT:-}" \
+      -e "DATA_ENG_WORKTREE_PARENT=${DATA_ENG_WORKTREE_PARENT:-}" \
+      -e "SCRAPER_REPO_ROOT=${SCRAPER_REPO_ROOT:-}" \
+      -e "SCRAPER_WORKTREE_PARENT=${SCRAPER_WORKTREE_PARENT:-}" \
+      -e "ADO_ORG=${ADO_ORG:-}" \
+      -e "ADO_PROJECT=${ADO_PROJECT:-}" \
       "$CLAUDE_BIN"
 
     tmux set-option -t "$TMUX_NAME" mouse on >/dev/null 2>&1 || true

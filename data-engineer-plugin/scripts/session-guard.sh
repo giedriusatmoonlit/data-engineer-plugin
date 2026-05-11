@@ -21,7 +21,16 @@
 
 set -euo pipefail
 
-: "${DATA_ENG_WORK_ROOT:?DATA_ENG_WORK_ROOT not set}"
+# Fail-safe: if DATA_ENG_WORK_ROOT isn't set, we can't possibly be in
+# a /fix-pr session (every entry path exports it). Treat as "no lock
+# context" and exit 0 (= allow). This prevents the hook from bricking
+# a spawned pane just because tmux env propagation missed something.
+# The launcher passes the var explicitly with -e; this is the safety
+# net for resumed sessions, manual claude invocation in a worktree,
+# or any other edge case where env propagation broke.
+if [ -z "${DATA_ENG_WORK_ROOT:-}" ]; then
+  exit 0
+fi
 
 _session_id() {
   if [ -n "${CLAUDE_SESSION_ID:-}" ]; then
