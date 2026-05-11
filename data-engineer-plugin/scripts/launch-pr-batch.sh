@@ -236,21 +236,52 @@ for PR_ID in "${PRS[@]}"; do
     tmux set-option -t "$TMUX_NAME" mouse on >/dev/null 2>&1 || true
     tmux set-option -t "$TMUX_NAME" focus-events on >/dev/null 2>&1 || true
 
-    # Poll for claude's input prompt before sending the slash command.
+    # Poll for claude's input prompt. Along the way, dismiss any modal
+    # prompts that come up in a fresh worktree:
+    #   - .mcp.json approval ("New MCP server found")
+    #   - folder-trust ("Do you trust the files in this folder")
+    #   - "What's new" splash
+    # All three are advanced by Enter selecting the first/default option,
+    # which for MCP+trust is the "accept for this project" choice.
     READY=0
-    for _ in $(seq 1 20); do
+    DISMISSED=()
+    for _ in $(seq 1 30); do
       sleep 1
-      PANE=$(tmux capture-pane -t "$TMUX_NAME" -p -S -8 2>/dev/null || true)
+      PANE=$(tmux capture-pane -t "$TMUX_NAME" -p -S -40 2>/dev/null || true)
+
+      # MCP-server approval modal: Enter accepts option 1 ("use this and all future").
+      if echo "$PANE" | grep -q 'New MCP server found in .mcp.json'; then
+        tmux send-keys -t "$TMUX_NAME" Enter
+        DISMISSED+=("mcp-approval")
+        sleep 1
+        continue
+      fi
+
+      # Folder-trust modal: Enter accepts the default ("yes, I trust").
+      if echo "$PANE" | grep -qiE 'do you trust the files in this folder|trust this folder'; then
+        tmux send-keys -t "$TMUX_NAME" Enter
+        DISMISSED+=("folder-trust")
+        sleep 1
+        continue
+      fi
+
+      # Reached the input prompt — claude is ready for our slash command.
       if echo "$PANE" | grep -qE '^❯' && echo "$PANE" | grep -q 'auto mode'; then
         READY=1
         break
       fi
     done
 
+    if [ "${#DISMISSED[@]}" -gt 0 ]; then
+      yellow "  dismissed modal(s): ${DISMISSED[*]}"
+    fi
+
     if [ "$READY" -eq 0 ]; then
-      yellow "  tmux session created but claude didn't reach the input prompt in 20s"
-      yellow "  attach manually and type:  /data-engineer-plugin:fix-pr $PR_ID"
+      yellow "  tmux session created but claude didn't reach the input prompt in 30s"
+      yellow "  attach manually:  tmux attach -t $TMUX_NAME"
+      yellow "  then type:        /data-engineer-plugin:fix-pr $PR_ID"
     else
+      # Dismiss any residual "What's new" splash with one Enter.
       tmux send-keys -t "$TMUX_NAME" Enter
       sleep 0.3
       tmux send-keys -t "$TMUX_NAME" "/data-engineer-plugin:fix-pr $PR_ID"
