@@ -1,0 +1,16 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "data-engineer-plugin",
+  "description": "Marketplace for data-engineer-plugin — Claude Code helpers for ADO PR review work, with /address-pr as the first helper. Sibling marketplace to api-scraper.",
+  "owner": {
+    "name": "giedriusatmoonlit"
+  },
+  "plugins": [
+    {
+      "name": "data-engineer-plugin",
+      "description": "3-phase ADO PR-review-addressing flow that parallelizes across PRs via claude-squad. Triage (categorize comments) → Address (edits + commits in a per-PR worktree) → Handoff (push checklist + draft replies). Stops one step before push.",
+      "source": "./data-engineer-plugin",
+      "category": "development"
+    }
+  ]
+}
