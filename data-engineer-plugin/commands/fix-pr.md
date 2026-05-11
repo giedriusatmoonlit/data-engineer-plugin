@@ -54,24 +54,27 @@ Before any phase work:
    `comments.md` as `NEW:` items (preserving existing checkbox state on
    pre-existing items). Bump `must_fix_total` if new MFs landed.
 
-## Orientation banner (always printed first)
+## Orientation banner (always first, deterministic)
 
-Before any work, print this block so the developer knows the state:
+The very first thing every turn — before reading any state, before any
+phase work, before any plan — is to print the situational briefing:
 
+```bash
+bash $CLAUDE_PLUGIN_ROOT/scripts/pr-status.sh <PR_ID>
 ```
-== /data-engineer-plugin:fix-pr · <PR_ID> ==
-PR:          #<N>   <PR_TITLE>
-PR URL:      <PR_URL>
-Ticket:      <DAT-NNN or "<none>">
-Phase:       <N> · <PHASE_NAME>      (advance: pr-stage-complete.sh <PR_ID>)
-Source:      <SOURCE_BRANCH>         (target: <TARGET_BRANCH>)
-Worktree:    <WORKTREE_PATH>
-Triage SHA:  <HEAD_SHA_AT_TRIAGE>    (HEAD now: <CURRENT_SHA>)
-Must-fix:    <ADDRESSED>/<TOTAL> addressed
-Nits:        <NITS_TOTAL>   Questions: <QUESTIONS_TOTAL>
-Awaiting human: <true|false>
-About to do: <one short sentence on this turn's intent>
-```
+
+This is a shell script (not model-generated text), so the output is
+deterministic: PR title + URL, linked ticket, current phase + name,
+worktree health (branch, dirty/clean, commits since triage),
+must-fix / nit / question counts, the top 3 unaddressed MFs, and the
+single most useful next action for the current phase.
+
+After the banner prints, state in ONE sentence what *this turn* will do.
+Then proceed.
+
+Do not skip this step. Even on a resumed session where the state is
+"obvious," the developer benefits from seeing the same briefing every
+time — it's the same shape, so they scan it in under 2 seconds.
 
 ## Phase work
 
