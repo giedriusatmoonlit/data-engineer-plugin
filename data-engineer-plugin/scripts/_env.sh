@@ -81,27 +81,26 @@ parse_dat_from() {
 }
 
 # ── PR path resolvers ─────────────────────────────────────────────────────────
-# All resolvers assume DATA_ENG_WORK_ROOT is set; require_env it at the top
-# of any script that uses them.
-pr_dir()          { echo "$DATA_ENG_WORK_ROOT/pr_notes/$1"; }
-pr_state_file()   { echo "$DATA_ENG_WORK_ROOT/pr_notes/$1/state.json"; }
-pr_packet_file()  { echo "$DATA_ENG_WORK_ROOT/pr_notes/$1/pr_packet.json"; }
-pr_comments_md()  { echo "$DATA_ENG_WORK_ROOT/pr_notes/$1/comments.md"; }
-pr_plan_md()      { echo "$DATA_ENG_WORK_ROOT/pr_notes/$1/plan.md"; }
-pr_handoff_md()   { echo "$DATA_ENG_WORK_ROOT/pr_notes/$1/handoff.md"; }
-pr_batch_dir()    { echo "$DATA_ENG_WORK_ROOT/pr_notes/_batch/$1"; }
-pr_batch_file()   { echo "$DATA_ENG_WORK_ROOT/pr_notes/_batch/$1/batch.json"; }
+# All per-PR state lives INSIDE the worktree at <worktree>/.notes/. The
+# path resolvers below derive that location from convention:
+#
+#   <worktree-parent>/<repo>-pr-NNNN/.notes/{state.json,pr_packet.json,
+#                                            comments.md, plan.md, handoff.md}
+#
+# Why in-tree: notes live next to the code they're about. You see them
+# from `ls`, Cursor's file tree, ripgrep. Surviving a `git worktree
+# remove` is intentionally NOT a goal here — once a PR is shipped, the
+# worktree (and its notes) are disposable. Batch metadata, which spans
+# multiple PRs, stays under $DATA_ENG_WORK_ROOT.
+#
+# Env-var fallback chain for the worktree parent:
+#   $DATA_ENG_WORKTREE_PARENT → $SCRAPER_WORKTREE_PARENT → $HOME/worktrees
+# For the repo root used as base for the worktree:
+#   $DATA_ENG_REPO_ROOT → $SCRAPER_REPO_ROOT
 
 # Lowercase PR id (for worktree paths: {repo}-pr-NNNN).
 pr_numeric_lower() { echo "${1#PR-}" | tr '[:upper:]' '[:lower:]'; }
 
-# Default worktree path for a PR. Mirrors the existing manual convention
-# (e.g. ~/moonlit/Databricks-pr-2299).
-#
-# Env-var fallback chain for the worktree parent:
-#   $DATA_ENG_WORKTREE_PARENT → $SCRAPER_WORKTREE_PARENT → $HOME/worktrees
-# Same for the repo root used as the base:
-#   $DATA_ENG_REPO_ROOT → $SCRAPER_REPO_ROOT
 worktree_parent() {
   echo "${DATA_ENG_WORKTREE_PARENT:-${SCRAPER_WORKTREE_PARENT:-$HOME/worktrees}}"
 }
@@ -114,6 +113,48 @@ worktree_path_for_pr() {
   repo=$(basename "$(repo_root)")
   [ -z "$repo" ] && die "Cannot resolve worktree path: neither DATA_ENG_REPO_ROOT nor SCRAPER_REPO_ROOT set"
   echo "$(worktree_parent)/${repo}-pr-$(pr_numeric "$pr_id")"
+}
+# Alias for readability in callers that think in "PR worktree" terms.
+pr_worktree()     { worktree_path_for_pr "$1"; }
+
+# Per-PR notes live INSIDE the worktree. These four resolvers compose
+# from worktree_path_for_pr.
+pr_dir()          { echo "$(worktree_path_for_pr "$1")/.notes"; }
+pr_state_file()   { echo "$(pr_dir "$1")/state.json"; }
+pr_packet_file()  { echo "$(pr_dir "$1")/pr_packet.json"; }
+pr_comments_md()  { echo "$(pr_dir "$1")/comments.md"; }
+pr_plan_md()      { echo "$(pr_dir "$1")/plan.md"; }
+pr_handoff_md()   { echo "$(pr_dir "$1")/handoff.md"; }
+
+# Batch metadata stays under DATA_ENG_WORK_ROOT — it spans multiple PRs
+# and has no natural worktree home.
+pr_batch_dir()    { echo "$DATA_ENG_WORK_ROOT/pr_notes/_batch/$1"; }
+pr_batch_file()   { echo "$DATA_ENG_WORK_ROOT/pr_notes/_batch/$1/batch.json"; }
+
+# Initialize a worktree's .notes/ dir + gitignore-exclude it from commits.
+# Idempotent. Caller has already created the worktree.
+init_pr_notes() {
+  local pr_id="$1"
+  local wt
+  wt=$(worktree_path_for_pr "$pr_id")
+  [ -d "$wt" ] || die "init_pr_notes: worktree not on disk: $wt"
+  mkdir -p "$wt/.notes"
+  # Per-worktree gitignore (no global pollution): .git/info/exclude.
+  # The exclude file is in the LINKED git dir; resolve it via git itself.
+  local gitdir
+  # --absolute-git-dir is required: --git-dir alone returns ".git" relative
+  # to cwd, which breaks the touch/append calls below.
+  gitdir=$(git -C "$wt" rev-parse --absolute-git-dir 2>/dev/null) || gitdir=""
+  if [ -n "$gitdir" ]; then
+    # Worktree-linked git dirs are under <main>/.git/worktrees/<name>/.
+    # info/exclude there shadows the main repo's, scoped to this worktree.
+    local exclude="$gitdir/info/exclude"
+    mkdir -p "$gitdir/info"
+    touch "$exclude"
+    if ! grep -qxF '.notes/' "$exclude" 2>/dev/null; then
+      printf '\n# data-engineer-plugin per-PR scratchpad\n.notes/\n' >> "$exclude"
+    fi
+  fi
 }
 
 # ── state.json helpers ────────────────────────────────────────────────────────

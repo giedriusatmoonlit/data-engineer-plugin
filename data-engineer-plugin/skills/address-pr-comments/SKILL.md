@@ -60,12 +60,16 @@ az rest \
   > /tmp/threads.json
 ```
 
-Combine into the cached packet:
+Combine into the cached packet. **All per-PR artifacts live in the
+worktree under `.notes/`** — that's where the code is, that's where the
+notes live, no separate root path to remember:
 
 ```bash
+# You're already inside the worktree (state.worktree_path). cwd is fine.
+mkdir -p .notes
 jq -s '{pr: .[0], comments: .[1], threads: .[2]}' \
   /tmp/pr.json /tmp/comments.json /tmp/threads.json \
-  > "$DATA_ENG_WORK_ROOT/pr_notes/$PR_ID/pr_packet.json"
+  > .notes/pr_packet.json
 ```
 
 Extract canonical fields once for state.json:
@@ -416,27 +420,29 @@ When `/address-pr --refresh` or `/fix-pr --refresh` runs:
 
 ## Bash-snippet bundle
 
+Run all of this from inside the worktree. `.notes/` is the canonical
+location; no external path needed.
+
 ```bash
 fetch_pr_packet() {
-  local pr_num="$1" pr_id="PR-$1"
-  local dir="$DATA_ENG_WORK_ROOT/pr_notes/$pr_id"
-  mkdir -p "$dir"
+  local pr_num="$1"
+  mkdir -p .notes
 
-  az repos pr show --id "$pr_num" --output json > "$dir/.pr.json"
-  az repos pr list-comments --id "$pr_num" --output json > "$dir/.comments.json"
+  az repos pr show --id "$pr_num" --output json > .notes/.pr.json
+  az repos pr list-comments --id "$pr_num" --output json > .notes/.comments.json
 
   local repo_id org project
-  repo_id=$(jq -r '.repository.id' "$dir/.pr.json")
+  repo_id=$(jq -r '.repository.id' .notes/.pr.json)
   org=$(az devops configure --list | awk -F'= *' '/^organization/{print $2}' | sed 's|.*/||;s|/$||')
   project=$(az devops configure --list | awk -F'= *' '/^project/{print $2}')
   az rest --method GET \
     --url "https://dev.azure.com/$org/$project/_apis/git/repositories/$repo_id/pullRequests/$pr_num/threads?api-version=7.0" \
-    > "$dir/.threads.json"
+    > .notes/.threads.json
 
   jq -s '{pr: .[0], comments: .[1], threads: .[2]}' \
-    "$dir/.pr.json" "$dir/.comments.json" "$dir/.threads.json" \
-    > "$dir/pr_packet.json"
-  rm "$dir/.pr.json" "$dir/.comments.json" "$dir/.threads.json"
+    .notes/.pr.json .notes/.comments.json .notes/.threads.json \
+    > .notes/pr_packet.json
+  rm .notes/.pr.json .notes/.comments.json .notes/.threads.json
 }
 ```
 

@@ -335,15 +335,39 @@ for PR_ID in "${PRS[@]}"; do
      }]' "$CS_STATE" > "$TMP" && mv "$TMP" "$CS_STATE"
   green "  cs state.json updated"
 
-  # 4. bump pr state.json — record worktree, head_sha_at_triage stays as set by triage.
+  # 4. Initialize .notes/ in the worktree (idempotent) + gitignore it
+  #    locally so it's never committed. Write a minimal state.json so
+  #    fix-pr's preflight has something to read.
+  init_pr_notes "$PR_ID"
   STATE_FILE=$(pr_state_file "$PR_ID")
-  if [ -f "$STATE_FILE" ]; then
+  if [ ! -f "$STATE_FILE" ]; then
+    jq -n --arg pid "$PR_ID" \
+          --arg branch "$SRC_BRANCH" \
+          --arg url "$PR_URL" \
+          --arg ticket "$TICKET" \
+          --arg wt "$WT_PATH" \
+          --arg sha "$BASE_SHA" \
+          --arg ts "$CREATED" \
+          --arg bid "$BATCH_ID" \
+        '{pr_id:$pid, pr_url:$url, ticket_id:$ticket,
+          source_branch:$branch, target_branch:"master",
+          worktree_path:$wt, head_sha_at_triage:$sha,
+          phase:0, phase_name:"fresh",
+          batch_id:$bid, launched_at:$ts,
+          must_fix_total:0, must_fix_addressed:0,
+          nits_total:0, questions_total:0,
+          awaiting_human:false}' > "$STATE_FILE"
+    green "  .notes/state.json initialized (phase 0)"
+  else
+    # State already exists (e.g. re-launch). Just refresh worktree_path
+    # in case it moved; preserve everything else (especially head_sha_at_triage
+    # and counters).
     TMP=$(mktemp)
     jq --arg wt "$WT_PATH" --arg sha "$BASE_SHA" --arg ts "$CREATED" \
        '. + {worktree_path: $wt, launched_at: $ts} |
         if (.head_sha_at_triage // "") == "" then .head_sha_at_triage = $sha else . end' \
        "$STATE_FILE" > "$TMP" && mv "$TMP" "$STATE_FILE"
-    green "  pr_notes/$PR_ID/state.json updated (worktree_path)"
+    green "  .notes/state.json refreshed (worktree_path)"
   fi
 
   LAUNCHED+=("$PR_ID")

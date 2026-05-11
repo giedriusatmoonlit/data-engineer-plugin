@@ -6,11 +6,16 @@ allowed-tools: Bash, Read, Write, Edit, Grep, Glob
 
 # /data-engineer-plugin:address-pr
 
-Bulk PR onboarding for ADO PRs. Diagnoses every input PR (fetches via
-`az repos pr`, categorizes comments via the **`address-pr-comments`**
-skill, writes per-PR packets to `pr_notes/PR-NNNN/`), then auto-spawns
-one claude-squad session per PR. Inside each session,
-`/data-engineer-plugin:fix-pr` runs the per-PR three-phase loop.
+Bulk PR onboarding for ADO PRs. Light orchestrator: for every input
+PR, creates a fresh worktree at `<repo>-pr-NNNN` and spawns a
+claude-squad session in it. Each spawned session then **self-triages**
+as Phase 0→1 of `/data-engineer-plugin:fix-pr` — fetches via `az`,
+categorizes comments, writes `.notes/{state.json, pr_packet.json,
+comments.md, plan.md}` *inside its own worktree*.
+
+Per-PR notes live in `<worktree>/.notes/` — no external path to chase.
+Batch metadata (which spans multiple PRs) stays at
+`$DATA_ENG_WORK_ROOT/pr_notes/_batch/<BATCH_ID>/`.
 
 This command **never pushes** and **never replies to ADO threads**. It
 prepares everything; the developer pushes when they're ready.
@@ -73,8 +78,10 @@ Before any work:
    - Explicit list → canonicalize each (1234, #1234, PR-1234 → PR-1234)
    - `--mine` → `az repos pr list --creator @me --status active --output json`
 2. **Read prior state per PR**: for each, check
-   `$DATA_ENG_WORK_ROOT/pr_notes/PR-NNNN/state.json`. Parse `phase`,
-   `batch_id`, `awaiting_human`, `must_fix_addressed/total`.
+   `<worktree>/.notes/state.json` if the worktree already exists at
+   `<worktree-parent>/<repo>-pr-NNNN/` (resume case). Parse `phase`,
+   `batch_id`, `awaiting_human`, `must_fix_addressed/total`. For PRs
+   with no worktree on disk yet, this is a fresh entry.
 3. **Resolve or generate BATCH_ID**:
    - All same `batch_id` → re-run that batch (same as `--refresh`)
    - All different / mixed → fresh `PB-YYYY-MM-DD-NN`
@@ -88,16 +95,12 @@ Before any work:
    | PR-2301   | DAT-605  | 0 (no state)     | triage + spawn cs |
    | PR-2305   | DAT-612  | 2 (addressed)    | spawn cs (resume at HANDOFF) |
    ```
-5. **Per-PR triage** (in parallel, capped by `--concurrency`): for each
-   PR at phase 0, run the **`address-pr-comments`** skill:
-   - `az repos pr show --id N --output json`
-   - `az repos pr list-comments --id N --output json` (threads + replies)
-   - Parse DAT-NNN from title or description (record in
-     `state.ticket_id`; empty if not found — non-fatal)
-   - Categorize every comment: MF / NIT / Q / RESOLVED (rules in the skill)
-   - Write `pr_notes/PR-NNNN/{pr_packet.json, comments.md, plan.md, state.json}`
-   - Phase 0 → 1 (run `pr-stage-complete.sh PR-NNNN`)
-6. **Write `pr_notes/_batch/<BATCH_ID>/batch.json`**:
+5. **Skip master-side triage.** Triage now happens in each spawned
+   pane (Phase 0→1 of `/fix-pr`), where the model has cwd = worktree
+   and can write `.notes/` directly. The master session doesn't run
+   `az` at all — that keeps it light and removes the chicken-and-egg
+   of "writing notes before the worktree exists".
+6. **Write `$DATA_ENG_WORK_ROOT/pr_notes/_batch/<BATCH_ID>/batch.json`**:
    ```json
    {
      "batch_id": "PB-...",
@@ -172,14 +175,14 @@ Cursor:        cursor $DATA_ENG_WORK_ROOT/pr_notes/_batch/PB-.../batch.code-work
 - ❌ Push the branches — that's `/fix-pr`'s handoff, executed by the dev
 - ❌ Reply to ADO threads via API
 - ❌ Approve / complete / abandon PRs
-- ❌ Edit any code — only writes under `pr_notes/`
+- ❌ Edit any code — only writes batch metadata under `pr_notes/_batch/` + spawns sessions. Per-PR notes are written by each session into its own worktree.
 - ❌ Spawn anything other than the triage work and `launch-pr-batch.sh`
 
 ## Implementation notes for the model running this command
 
 1. Run preflight. Abort on first failure with a specific error.
 2. Resolve PR list per form.
-3. State scan: read each PR's `pr_notes/PR-NNNN/state.json` if present.
+3. State scan: read each PR's `<worktree>/.notes/state.json` if the worktree exists on disk.
 4. Resolve BATCH_ID.
 5. Print the pre-spawn status table.
 6. For `--status` / `--report`, exit here.

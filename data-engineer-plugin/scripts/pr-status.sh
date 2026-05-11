@@ -164,14 +164,13 @@ case "$PHASE" in
         | sed -E 's/^- \[ \] \*\*(MF-[0-9]+)\*\*.*/\1/')
     fi
     if [ -n "$NEXT_MF" ] && [ -f "$PR_DIR/plan.md" ]; then
-      # Pull the one-line summary from the plan.md heading for this MF.
       NEXT_FILE=$(grep -m1 -E "^## .*$NEXT_MF\b" "$PR_DIR/plan.md" 2>/dev/null \
         | sed -E "s/^## [0-9. ]*$NEXT_MF +[—-]+ +//")
     fi
     echo "  Consultative ADDRESS loop — propose to dev, then apply on approval."
     if [ -n "$NEXT_MF" ]; then
       echo "    Next:  $NEXT_MF${NEXT_FILE:+  ·  $NEXT_FILE}"
-      echo "    1. Print $NEXT_MF block from plan.md (reviewer intent, code, proposed approach)"
+      echo "    1. Print $NEXT_MF block from .notes/plan.md (reviewer intent, code, proposed approach)"
       echo "    2. Read each skill listed under 'Relevant skills'"
       echo "    3. Ask dev:  approve / different / skip / show-alternatives / show-related-code"
       echo "    4. On approve → edit in worktree → commit → mark [x] → bump counter"
@@ -179,23 +178,23 @@ case "$PHASE" in
     else
       echo "    All MFs resolved or no MFs in plan."
     fi
-    echo "    Files:"
-    echo "      $PR_DIR/plan.md       proposals (per-MF approach + open questions)"
-    echo "      $PR_DIR/comments.md   audit trail (Dev notes, Applied lines, checkboxes)"
-    echo "      $WT                   worktree (edit here)"
-    echo "    Gate:    bash \$CLAUDE_PLUGIN_ROOT/scripts/pr-stage-complete.sh $PR_ID"
+    echo "    Files (relative to this worktree):"
+    echo "      .notes/plan.md       proposals (per-MF approach + open questions)"
+    echo "      .notes/comments.md   audit trail (Dev notes, Applied lines, checkboxes)"
+    echo "      <other files>        the code you're editing"
+    echo "    Gate:  bash \$CLAUDE_PLUGIN_ROOT/scripts/pr-stage-complete.sh $PR_ID"
     ;;
   2)
     echo "  Write the developer's HANDOFF sheet:"
-    echo "    Render $PR_DIR/handoff.md from"
+    echo "    Render .notes/handoff.md from"
     echo "       \$CLAUDE_PLUGIN_ROOT/skills/address-pr-comments/handoff.template.md"
     echo "    Gate:  bash \$CLAUDE_PLUGIN_ROOT/scripts/pr-stage-complete.sh $PR_ID"
     ;;
   3)
     echo "  Phase 3 reached — your work in this cs pane is done."
-    echo "    Read   $PR_DIR/handoff.md"
+    echo "    Read   .notes/handoff.md"
     echo "    Push:  git -C $WT push origin $SRC"
-    echo "    Then reply to each thread on ADO using the drafts in handoff.md."
+    echo "    Then reply to each thread on ADO using the drafts in .notes/handoff.md."
     echo
     echo "  If reviewer comes back with more:"
     echo "    /data-engineer-plugin:fix-pr $PR_ID --refresh"

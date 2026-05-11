@@ -99,21 +99,33 @@ data-engineer-plugin/
 
 ## On-disk state
 
+Per-PR notes live **inside each worktree** at `.notes/` — close to the
+code they're about, visible in `ls` / Cursor / ripgrep, and locally
+gitignored via `.git/info/exclude` so they never leak into commits.
+
 ```
-$DATA_ENG_WORK_ROOT/
+<worktree-parent>/<repo>-pr-2299/        # the worktree itself
+├── Scrapers/                            # the code
+├── Pipelines/
+└── .notes/                              # per-PR scratchpad (gitignored)
+    ├── state.json                       # phase, counters, head_sha_at_triage
+    ├── pr_packet.json                   # cached az response
+    ├── comments.md                      # MF-/NIT-/Q- with checkbox status
+    ├── plan.md                          # per-MF: Proposed approach + Open question
+    └── handoff.md                       # phase-3 output for the developer
+
+$DATA_ENG_WORK_ROOT/                     # batch-level + session-level only
 ├── pr_notes/
-│   ├── PR-2299/
-│   │   ├── state.json
-│   │   ├── pr_packet.json     # az response cache
-│   │   ├── comments.md        # MF-/NIT-/Q- with checkbox status
-│   │   ├── plan.md            # action order
-│   │   └── handoff.md         # phase-3 output for the developer
 │   └── _batch/
-│       └── PB-2026-05-11-01/
+│       └── PB-2026-05-11-01/            # spans multiple PRs — lives outside any one worktree
 │           ├── batch.json
-│           └── batch.code-workspace
-└── .session-lock-<SESSION_ID>.json
+│           └── batch.code-workspace     # multi-root .code-workspace
+└── .session-lock-<SESSION_ID>.json      # session lock; not PR-bound
 ```
+
+Worktree removed → notes removed. By design: once a PR is shipped, the
+working dir and its scratchpad are disposable. Batch metadata sticks
+around so you can re-render reports for closed batches later.
 
 ## Comparison with api-scraper
 

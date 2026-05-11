@@ -7,13 +7,14 @@
 #
 # Allow rules:
 #   - No lock file present → allow everything (we're outside /fix-pr)
-#   - Path/command doesn't reference any PR dir → allow
-#   - Path/command references the locked PR → allow
-#   - Path/command references a DIFFERENT PR → refuse with exit 2
+#   - Path/command doesn't reference any PR worktree → allow
+#   - Path/command references the locked PR's worktree → allow
+#   - Path/command references a DIFFERENT PR's worktree → refuse with exit 2
 #
 # Refuses on Write, Edit, NotebookEdit. Also inspects Bash commands for
-# obvious cross-PR writes (rm/mv/cp/tee/redirect into pr_notes/PR-* or
-# {repo}-pr-* worktrees).
+# obvious cross-PR writes (rm/mv/cp/tee/redirect into {repo}-pr-N worktrees).
+# Per-PR state lives in <worktree>/.notes/ so worktree-path detection
+# covers both the code edits and the metadata edits.
 #
 # Exits:
 #   0   allow
@@ -80,13 +81,12 @@ case "$TOOL" in
     ;;
   Bash)
     CMD=$(jq -r '.tool_input.command // empty' <<<"$PAYLOAD")
-    # Catch pr_notes/PR-NNNN/... references.
-    while IFS= read -r line; do
-      [ -n "$line" ] && PATHS+=("$line")
-    done < <(grep -oE "($DATA_ENG_WORK_ROOT|\$DATA_ENG_WORK_ROOT|~/[A-Za-z0-9._/-]*)/pr_notes/PR-[0-9]+[A-Za-z0-9./_-]*" <<<"$CMD" || true)
-    # Catch worktree paths of the form <repo>-pr-NNNN[/...]
-    # Use either DATA_ENG_WORKTREE_PARENT or SCRAPER_WORKTREE_PARENT as the
-    # anchor — both may be in play if the user has api-scraper installed.
+    # Per-PR state now lives inside the worktree at <worktree>/.notes/,
+    # so cross-PR detection is purely a worktree-path check. The old
+    # $DATA_ENG_WORK_ROOT/pr_notes/PR-NNNN/ layout is no longer written
+    # by the plugin (only batch metadata stays under there, which spans
+    # PRs and is intentionally not guarded).
+    # Catch worktree paths of the form <repo>-pr-NNNN[/...].
     for parent in "${DATA_ENG_WORKTREE_PARENT:-}" "${SCRAPER_WORKTREE_PARENT:-}"; do
       [ -z "$parent" ] && continue
       while IFS= read -r line; do
@@ -101,14 +101,11 @@ esac
 
 [ "${#PATHS[@]}" -eq 0 ] && exit 0
 
-# Extract the PR id from a path, if any. Two patterns:
-#   .../pr_notes/PR-NNNN[/...]
-#   .../<repo>-pr-NNNN[/...]
+# Extract the PR id from a worktree path of the form .../<repo>-pr-NNNN[/...].
+# That's the only path shape we guard now — per-PR state lives inside the
+# worktree, batch metadata under DATA_ENG_WORK_ROOT spans PRs by design.
 extract_pr_num() {
   local p="$1"
-  if [[ "$p" =~ /pr_notes/PR-([0-9]+) ]]; then
-    echo "${BASH_REMATCH[1]}"; return
-  fi
   if [[ "$p" =~ -pr-([0-9]+) ]]; then
     echo "${BASH_REMATCH[1]}"; return
   fi

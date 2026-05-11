@@ -146,43 +146,43 @@ next_phase_guide() {
     0)
       cat <<'EOF'
 NEXT — Phase 1 (TRIAGE): fetch and categorize PR comments.
-  • Invoke the pr-scout agent (or address-pr-comments skill directly)
+  • Apply the address-pr-comments skill (SKILL.md has the full recipe)
   • Fetch the PR with az:
-      az repos pr show       --id <N> --output json
+      az repos pr show         --id <N> --output json
       az repos pr list-comments --id <N> --output json
-    Combine into pr_notes/<PR_ID>/pr_packet.json
-  • Produce in pr_notes/<PR_ID>/:
+    Combine into .notes/pr_packet.json (relative to the worktree)
+  • Produce in <worktree>/.notes/:
       pr_packet.json    raw ADO response (cached for re-fetch diffing)
       comments.md       categorized: '- [ ] MF-N ...' must-fix /
                         '- [ ] NIT-N ...' nit / '- [ ] Q-N ...' question
-      plan.md           ordered action list: which files, in what order
-  • Set in state.json:
+      plan.md           per-MF blocks with Proposed approach + Open question
+  • Set in .notes/state.json:
       pr_id, pr_url, source_branch, head_sha_at_triage, must_fix_total
   • Re-run: bash $CLAUDE_PLUGIN_ROOT/scripts/pr-stage-complete.sh <PR_ID>
 EOF
       ;;
     1)
       cat <<'EOF'
-NEXT — Phase 2 (ADDRESS): make the changes, commit them, complete the phase.
-  • Work inside the worktree (state.worktree_path)
-  • For each MF-N in comments.md:
-      - Read the file:line range the comment points at
-      - Make the edit
-      - Mark the checkbox: '- [x] MF-N ...'
-      - Bump state.must_fix_addressed by 1
-  • Commit each logical group of changes:
-      git -C <worktree> add <files>
-      git -C <worktree> commit -m "review: address MF-N (<short>)"
+NEXT — Phase 2 (ADDRESS): consultative loop — propose, ask, apply.
+  • Walk .notes/plan.md one MF at a time
+  • For each MF-N:
+      1. Print the plan.md block (reviewer intent + code + Proposed approach)
+      2. Read each skill listed under "Relevant skills" (cross-plugin)
+      3. Ask dev: approve / different: <text> / skip / show-alternatives
+      4. On approve: edit in worktree → commit ("review: address MF-N (...)")
+                     → append 'Applied: ...' line to comments.md
+                     → mark '- [x] MF-N'
+                     → bump state.must_fix_addressed
   • Worktree must end clean (git status --porcelain empty)
   • NEW commits must exist since state.head_sha_at_triage
-  • Nits + questions are documented in comments.md but NOT gating
+  • Nits = same loop (approve/skip only). Questions = reply text only.
   • Re-run: bash $CLAUDE_PLUGIN_ROOT/scripts/pr-stage-complete.sh <PR_ID>
 EOF
       ;;
     2)
       cat <<'EOF'
 NEXT — Phase 3 (HANDOFF): write the developer's push checklist.
-  • Render pr_notes/<PR_ID>/handoff.md from the
+  • Render .notes/handoff.md from the
     skills/address-pr-comments/handoff.template.md template. Fill in:
       - New commit SHAs since triage (one line each, with subject)
       - Per-MF mapping (commit → MF-N)

@@ -8,7 +8,7 @@ allowed-tools: Bash, Read, Write, Edit, Grep, Glob
 
 Per-PR state machine. Takes the **PR id** (any of `2299`, `#2299`,
 `PR-2299` — canonicalized to `PR-NNNN`), reads
-`pr_notes/PR-NNNN/state.json`, runs the next phase, validates the gate
+`.notes/state.json` (inside the PR's worktree), runs the next phase, validates the gate
 via `pr-stage-complete.sh`, advances.
 
 Same shape as `api-scraper`'s `/make-scraper` but for PRs — three
@@ -41,10 +41,12 @@ Before any phase work:
    If another PR holds the lock, refuse and tell the user. **Do not**
    run `lock.sh release` without arguments to bypass — that's caught
    and refused by lock.sh itself.
-3. **State** — read `pr_notes/<PR_ID>/state.json`. If missing, abort
-   with:
+3. **State** — read `<worktree>/.notes/state.json`. If missing, abort with:
    > Run /data-engineer-plugin:address-pr <PR_ID> first — no triage
    > packet yet.
+   You're already cd'd into the worktree (the launcher set the tmux
+   session's working dir to the worktree), so `.notes/state.json`
+   resolves relative.
 4. **Worktree** — `state.worktree_path` must exist on disk. If not,
    abort with the restore instructions (see "Worktree missing" below).
 5. **Branch** — confirm the worktree is on `state.source_branch`. If
@@ -85,7 +87,7 @@ Run the **`address-pr-comments`** skill inline (its SKILL.md has the
 canonical rules + ADO API calls). It will:
 
 - Fetch `az repos pr show` + `list-comments`
-- Cache the JSON to `pr_notes/<PR_ID>/pr_packet.json`
+- Cache the JSON to `.notes/pr_packet.json` (relative to the worktree)
 - Categorize every comment: `MF-N` (must-fix), `NIT-N` (nit),
   `Q-N` (question), `RESOLVED` (thread already closed/fixed)
 - Write `comments.md` with checkbox status: `- [ ] MF-1 file.py:42 · @reviewer · ...`
@@ -205,7 +207,7 @@ shipping this round.
 
 ### Phase 2 → 3  HANDOFF
 
-Render `pr_notes/<PR_ID>/handoff.md` from
+Render `.notes/handoff.md` from
 `${CLAUDE_PLUGIN_ROOT}/skills/address-pr-comments/handoff.template.md`.
 It must contain:
 
@@ -232,7 +234,7 @@ bash $CLAUDE_PLUGIN_ROOT/scripts/pr-stage-complete.sh <PR_ID>
 ```
 Phase 3 (HANDOFF) reached. fix-pr is done for <PR_ID>.
 
-→ Read pr_notes/<PR_ID>/handoff.md
+→ Read .notes/handoff.md
 → Run the push command shown there
 → Reply to each thread using the draft replies in handoff.md
 
@@ -250,7 +252,7 @@ bash $CLAUDE_PLUGIN_ROOT/scripts/lock.sh release <PR_ID>
 
 Use `pr-stage-complete.sh --check-only <PR_ID>` to test if a phase
 gate will pass — it's the deterministic source of truth. **Do not**
-`ls` random `pr_notes/<PR_ID>/*` paths to figure out what exists.
+`ls` random `.notes/*` paths to figure out what exists.
 
 ## Worktree missing
 
