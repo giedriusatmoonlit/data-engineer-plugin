@@ -1,12 +1,12 @@
 ---
 name: address-pr-comments
 description: >
-  Categorize Azure DevOps PR review comments into must-fix / nit / question /
-  resolved, and write the per-PR triage packet (pr_packet.json + comments.md +
-  plan.md + state.json). Used by /data-engineer-plugin:address-pr (master
-  triage) and /data-engineer-plugin:fix-pr Phase 0 (in-session triage).
-  Defines the ADO API call shapes, the categorization rules, the comments.md
-  format, and the handoff.md template.
+  Fetch Azure DevOps PR review threads and write the per-PR triage packet
+  (pr_packet.json + state.json with a flat open_threads[] list of every
+  non-resolved thread). No classification — the dev decides per thread
+  during ADDRESS. Used by /data-engineer-plugin:address-pr (master triage)
+  and /data-engineer-plugin:fix-pr Phase 0 (in-session triage). Defines
+  the ADO API call shapes and the per-thread decision shape.
 phase: 0-triage
 ---
 
@@ -14,6 +14,13 @@ phase: 0-triage
 
 The canonical rules for taking an ADO PR and producing a structured
 triage packet a `/fix-pr` session can mechanically work through.
+
+> **Design note**: this skill does **not** classify comments into
+> must-fix / nit / question. Every non-resolved ADO thread becomes one
+> entry in `open_threads[]`, in ADO thread-id order. The dev decides
+> per thread during ADDRESS — fix it, reply to it, defer it. Skipping
+> classification keeps the gate honest (nothing gets quietly demoted to
+> "nit") and matches how a human actually walks a review.
 
 > **Hard stop rule for the consumer**: this skill produces artifacts.
 > It does not push commits, does not call `az repos pr update`, does
@@ -91,101 +98,69 @@ https://dev.azure.com/$ORG/$PROJECT/_git/$REPO_NAME/pullrequest/$PR_NUM
 
 ---
 
-## Step 2: Categorize each comment thread
+## Step 2: List open threads (no classification)
 
-A "comment" here = one thread (a top-level review comment + its replies).
-ADO threads have a `status` field:
+A "thread" here = one ADO discussion thread (a top-level review comment
++ its replies). Filter by ADO `status`:
 
-| ADO status     | Meaning                          | Our category   |
-|----------------|----------------------------------|----------------|
-| `active`       | Open, no action yet              | needs categorize |
-| `pending`      | Reviewer is drafting             | skip (treat as not yet posted) |
-| `fixed`        | Author marked fixed              | RESOLVED       |
-| `wontFix`      | Resolved as won't fix            | RESOLVED       |
-| `closed`       | Closed without action            | RESOLVED       |
-| `byDesign`     | Resolved as by-design            | RESOLVED       |
+| ADO status     | Meaning                          | Action          |
+|----------------|----------------------------------|-----------------|
+| `active`       | Open, no action yet              | include         |
+| `pending`      | Reviewer is drafting             | skip (not yet posted) |
+| `fixed`        | Author marked fixed              | skip (RESOLVED) |
+| `wontFix`      | Resolved as won't fix            | skip (RESOLVED) |
+| `closed`       | Closed without action            | skip (RESOLVED) |
+| `byDesign`     | Resolved as by-design            | skip (RESOLVED) |
 
-For `active` threads, apply these rules **in order** (first match wins):
+**That's the only filter.** Every `active` thread becomes one entry in
+`open_threads[]`. No must-fix / nit / question tags — the dev decides
+per thread during ADDRESS what it warrants (code change, reply, defer).
 
-### MF (must-fix)
-
-A thread is MF if **any** of these hold:
-
-- PR vote `waitForAuthor` (-5) or `reject` (-10) from the thread's reviewer
-- Thread's first comment text contains any of (case-insensitive):
-  `must fix`, `blocker`, `P1`, `[critical]`, `please change`,
-  `this won't work`, `incorrect`, `wrong`, `bug:`, `breaking`
-- Thread contains explicit "request changes" reaction from a required reviewer
-- Thread is on a **file:line that contains a clear correctness issue**
-  per the comment body (model judgment, but conservative — when in
-  doubt, prefer MF over NIT)
-
-### Q (question)
-
-A thread is Q if **MF didn't fire** AND **any** of these hold:
-
-- First comment ends in `?`
-- Starts with `why`, `what`, `how`, `can you explain`, `could you clarify`
-- Contains `not sure if`, `is this intentional`, `should this be`
-
-### NIT (nit / style / optional)
-
-A thread is NIT if **MF and Q didn't fire** AND **any** of these hold:
-
-- Comment text starts with `nit:`, `style:`, `optional:`, `minor:`, `polish:`
-- Suggests cosmetic-only changes (renames, formatting, whitespace, comments)
-- Author explicitly tags as low-priority (`P3`, `feel free to ignore`)
-
-### Default
-
-If none of MF / Q / NIT fired and the thread is `active`, default to **MF**.
-Reviewers don't open threads for fun — when in doubt, treat as must-fix
-so the gate forces an explicit decision.
+Order: by ADO `thread_id` ascending (stable, append-only). New threads
+on `--refresh` append at the end.
 
 ---
 
-## Step 3: Write structured categorization into `state.json`
+## Step 3: Write `open_threads[]` into `state.json`
 
-**No markdown files are written this phase.** Categorization lands in
-`state.json` as a `categorized_comments` array — structured data the
-ADDRESS phase walks programmatically and the model presents in chat
-one MF at a time.
+**No markdown files are written this phase.** The list lands in
+`state.json` as a flat `open_threads` array — structured data the
+ADDRESS phase walks programmatically and presents in chat one entry at
+a time.
 
-For every actionable thread (status=active, not `resolved`), append an
-object to `state.categorized_comments` shaped like:
+For every `active` ADO thread, append an object to `state.open_threads`
+shaped like:
 
 ```json
 {
-  "id": "MF-1",
-  "kind": "must-fix",
+  "id": "T-1",
   "thread_id": "12345",
   "file_path": "Scrapers/NO/NOLOVDAT_basic.py",
   "line": 128,
   "reviewer": "@alice",
   "comment_excerpt": "The watermark check uses naive datetime comparison; will silently skip rows during DST transitions.",
   "thread_url": "https://dev.azure.com/.../pullrequest/2299?discussionId=12345",
+  "status": "active",
   "relevant_skills": ["api-scraper:scraper-rules", "api-scraper:scraper-basic"]
 }
 ```
 
 Format rules:
 
-- `id` is `MF-N` / `NIT-N` / `Q-N` with persistent numbering — once
-  issued, never renumber. On `--refresh`, new comments get fresh IDs
-  continuing the sequence.
-- `kind` is one of `must-fix`, `nit`, `question`.
+- `id` is `T-N` with persistent numbering — once issued, never renumber.
+  On `--refresh`, new threads get fresh IDs continuing the sequence.
+- `thread_id` is the ADO numeric thread id (lets `--refresh` match
+  threads across runs).
 - `comment_excerpt` is a paraphrase or short quote — enough to know
   what the reviewer wants without diving into pr_packet.json.
 - `relevant_skills` is the cross-plugin skill list for ADDRESS to read
   before editing (see "File-pattern → skill suggestions" below).
-- Resolved threads (`status=fixed`/`closed`/`wontFix`/`byDesign`) are
-  **omitted** from `categorized_comments` — they don't need action.
-  Optionally record them in a `resolved_threads` array if you want the
-  handoff to mention "X threads were already resolved".
+- Resolved threads are **omitted** from `open_threads`. Optionally
+  record them in a `resolved_threads` array if you want the end-of-
+  ADDRESS summary to mention "X threads were already resolved".
 
-Counters must match: `must_fix_total = count(kind=must-fix)`,
-similarly for nits and questions. `pr-stage-complete.sh` verifies this
-when gating Phase 0 → 1.
+Counter: `open_threads_total = length(open_threads)`. That's the only
+count the gate cares about — everything in the list must be decided.
 
 ---
 
@@ -420,7 +395,7 @@ and the model proceeds with general engineering judgment.
 
 `launch-pr-batch.sh` writes a minimal initial state.json when the
 worktree is created. TRIAGE fills in the rest in the same atomic update
-that writes `categorized_comments`:
+that writes `open_threads`:
 
 ```json
 {
@@ -439,27 +414,28 @@ that writes `categorized_comments`:
   "phase_name": "fresh",
   "batch_id": "PB-2026-05-11-01",
   "comments_fetched_at": "2026-05-11T10:30:00Z",
-  "must_fix_total": 3,
-  "must_fix_addressed": 0,
-  "nits_total": 2,
-  "questions_total": 1,
+  "open_threads_total": 6,
+  "addressed": 0,
   "awaiting_human": false,
   "last_known_vote": "waitForAuthor",
 
-  "categorized_comments": [
+  "open_threads": [
     {
-      "id": "MF-1", "kind": "must-fix", "thread_id": "12345",
+      "id": "T-1", "thread_id": "12345",
       "file_path": "Scrapers/NO/NOLOVDAT_basic.py", "line": 128,
       "reviewer": "@alice",
       "comment_excerpt": "DST watermark uses naive datetime; will silently skip rows.",
       "thread_url": "https://dev.azure.com/.../?discussionId=12345",
+      "status": "active",
       "relevant_skills": ["api-scraper:scraper-rules", "api-scraper:scraper-basic"]
     },
-    { "id": "MF-2", "kind": "must-fix", "...": "..." },
-    { "id": "MF-3", "kind": "must-fix", "...": "..." },
-    { "id": "NIT-1", "kind": "nit", "...": "..." },
-    { "id": "NIT-2", "kind": "nit", "...": "..." },
-    { "id": "Q-1",  "kind": "question", "...": "..." }
+    { "id": "T-2", "thread_id": "12346", "...": "..." },
+    { "id": "T-3", "thread_id": "12347", "...": "..." }
+  ],
+
+  "resolved_threads": [
+    { "id": "R-1", "thread_id": "12340", "status": "fixed",
+      "thread_url": "...", "comment_excerpt": "..." }
   ],
 
   "decisions": []
@@ -467,30 +443,36 @@ that writes `categorized_comments`:
 ```
 
 `decisions[]` is empty at end of TRIAGE — ADDRESS appends to it as each
-MF is decided. Each decision shape:
+open thread is decided. Three decision shapes:
+
+**applied** — code change committed:
 
 ```json
-{ "mf_id": "MF-1", "action": "applied",
-  "commit_sha": "abc1234", "applied_summary": "Converted to UTC via pendulum",
+{ "thread_id": "T-1", "action": "applied",
+  "commit_sha": "abc1234",
+  "applied_summary": "Converted to UTC via pendulum",
   "dev_note": "do both sides, normalize source",
   "decided_at": "2026-05-11T16:30:00Z" }
 ```
 
-or:
+**reply** — text-only response, no code change:
 
 ```json
-{ "mf_id": "MF-2", "action": "deferred",
+{ "thread_id": "T-5", "action": "reply",
+  "reply_text": "7-day default occasionally misses week-spanning publishes; bumping to 14d eliminates that without re-fetching the full corpus.",
+  "decided_at": "..." }
+```
+
+**deferred** — skipped this round:
+
+```json
+{ "thread_id": "T-2", "action": "deferred",
   "deferred_reason": "needs schema migration first; follow-up DAT-700",
   "decided_at": "..." }
 ```
 
-or for a question:
-
-```json
-{ "q_id": "Q-1", "action": "answered",
-  "reply_text": "7-day default occasionally misses week-spanning publishes...",
-  "decided_at": "..." }
-```
+The gate counts `applied` + `reply` toward `addressed`. Every entry in
+`open_threads` must have a decision before Phase 2 advances.
 
 ---
 
@@ -499,17 +481,16 @@ or for a question:
 When `/address-pr --refresh` or `/fix-pr --refresh` runs:
 
 1. Re-fetch `az repos pr show` + threads → new pr_packet.json content
-2. Diff against the cached `pr_packet.json` and update `state.categorized_comments`:
-   - **Threads with new replies** but already in categorized_comments →
-     update `comment_excerpt` to mention the new reply (e.g. prepend
-     `"[NEW reply from @reviewer] "`), don't issue a new id
+2. Diff against the cached `pr_packet.json` and update `state.open_threads`:
+   - **Threads with new replies** but already in open_threads (match by
+     `thread_id`) → update `comment_excerpt` to mention the new reply
+     (e.g. prepend `"[NEW reply from @reviewer] "`), don't issue a new id
    - **Threads created since last fetch** → append new entries to
-     `categorized_comments` with fresh ids continuing the sequence
-     (MF-4, MF-5, ...). Bump corresponding counters
-     (`must_fix_total`, etc.).
-   - **Threads now status=fixed/closed** → remove them from
-     `categorized_comments` and add a note to a sibling
-     `resolved_threads[]` array (id + thread_url) for the handoff.
+     `open_threads` with fresh ids continuing the sequence
+     (T-4, T-5, ...). Bump `open_threads_total`.
+   - **Threads now status=fixed/closed/wontFix/byDesign** → remove them
+     from `open_threads` and append to `resolved_threads[]` (preserve
+     their T-N id so the end-of-ADDRESS summary can reference them).
 3. `decisions[]` is preserved untouched — never lose dev-confirmed work.
 4. If PR's `head_sha` changed since triage (someone pushed):
    - Set `state.head_sha_drift = {old: ..., new: ..., detected_at: ...}`
@@ -554,12 +535,18 @@ fetch_pr_packet() {
 
 ## Anti-patterns (will be caught downstream)
 
-- Categorizing every active thread as NIT to make the gate trivially
-  pass. `pr-stage-complete.sh` doesn't gate on NIT count, but the
-  developer will rerun triage with `--refresh` and the gap will surface.
-- Skipping a thread because it "looks like noise". Issue an ID; mark
-  `[x]` immediately with a one-line note in the same item if you
-  decide it's truly nothing. Audit trail > silent drop.
-- Auto-replying to threads. This skill produces draft text; humans send it.
-- Recreating an issued ID. IDs are append-only — never reorder, never
-  renumber.
+- Pre-judging "this thread is just a nit, skip it" during TRIAGE.
+  Every active ADO thread becomes one `open_threads[]` entry. The dev
+  decides per thread during ADDRESS whether it warrants code, a reply,
+  or a defer.
+- Silently dropping a thread because it "looks like noise". Issue a
+  T-N id; let the dev mark it `deferred` with a reason in ADDRESS.
+  Audit trail > silent drop.
+- Auto-replying to threads. This skill produces draft text; humans
+  send it on ADO.
+- Recreating an issued ID. T-N ids are append-only — never reorder,
+  never renumber. New threads on `--refresh` get T-N+1, etc.
+- Re-classifying threads after the fact. There is no classification.
+  If a sibling skill or future model wants the historical MF/NIT/Q
+  bucketing, derive it from `decisions[].action` (`applied`/`reply`/
+  `deferred`) — that's the dev's actual call, not a heuristic guess.

@@ -6,7 +6,7 @@
 #   - what PR this is (title, URL, branch, linked ticket)
 #   - what phase we're at
 #   - worktree health (exists? clean? on the right branch?)
-#   - comment counts + top unaddressed must-fix items
+#   - open-thread counts + top undecided threads
 #   - the single most useful next action
 #
 # Called automatically by /data-engineer-plugin:fix-pr as step 0.
@@ -68,10 +68,9 @@ SRC=$(jq -r '.source_branch // empty' "$STATE")
 TGT=$(jq -r '.target_branch // "master"' "$STATE")
 TRIAGE_SHA=$(jq -r '.head_sha_at_triage // empty' "$STATE")
 WT=$(jq -r '.worktree_path // empty' "$STATE")
-MF_TOTAL=$(jq -r '.must_fix_total // 0' "$STATE")
-MF_DONE=$(jq -r  '.must_fix_addressed // 0' "$STATE")
-NIT_TOTAL=$(jq -r '.nits_total // 0' "$STATE")
-Q_TOTAL=$(jq -r '.questions_total // 0' "$STATE")
+OT_TOTAL=$(jq -r '.open_threads_total // 0' "$STATE")
+ADDR_DONE=$(jq -r '.addressed // 0' "$STATE")
+DEFERRED_N=$(jq -r '[.decisions[]? | select(.action == "deferred")] | length' "$STATE" 2>/dev/null || echo 0)
 LAST_VOTE=$(jq -r '.last_known_vote // empty' "$STATE")
 FETCHED=$(jq -r '.comments_fetched_at // empty' "$STATE")
 
@@ -86,9 +85,8 @@ echo
 # ── phase ─────────────────────────────────────────────────────────────────────
 case "$PHASE" in
   0) PHASE_COLOR="yellow"; PHASE_HINT="TRIAGE pending (run /fix-pr)" ;;
-  1) PHASE_COLOR="cyan";   PHASE_HINT="ADDRESS pending: edit + commit must-fix items" ;;
-  2) PHASE_COLOR="cyan";   PHASE_HINT="HANDOFF pending: write handoff.md" ;;
-  3) PHASE_COLOR="green";  PHASE_HINT="DONE — read handoff.md, push manually, reply on ADO" ;;
+  1) PHASE_COLOR="cyan";   PHASE_HINT="ADDRESS pending: walk open threads with dev" ;;
+  2) PHASE_COLOR="green";  PHASE_HINT="DONE — push manually, reply on ADO using the in-chat summary" ;;
   *) PHASE_COLOR="red";    PHASE_HINT="unknown phase $PHASE" ;;
 esac
 echo "  Phase:      $PHASE · $PHASE_NAME"
@@ -120,33 +118,34 @@ else
 fi
 echo
 
-# ── comments ──────────────────────────────────────────────────────────────────
+# ── threads ──────────────────────────────────────────────────────────────────
 echo "$HR_THIN"
-echo "  Comments"
+echo "  Open threads"
 echo "$HR_THIN"
-printf "  Must-fix:   %2d/%-2d addressed\n"  "$MF_DONE" "$MF_TOTAL"
-printf "  Nits:       %2d documented\n"       "$NIT_TOTAL"
-printf "  Questions:  %2d open\n"             "$Q_TOTAL"
+UNDECIDED_N=$((OT_TOTAL - ADDR_DONE - DEFERRED_N))
+[ "$UNDECIDED_N" -lt 0 ] && UNDECIDED_N=0
+printf "  Total:      %2d\n"          "$OT_TOTAL"
+printf "  Addressed:  %2d  (applied + reply)\n" "$ADDR_DONE"
+printf "  Deferred:   %2d\n"          "$DEFERRED_N"
+printf "  Undecided:  %2d\n"          "$UNDECIDED_N"
 echo
 
-# ── top unaddressed MFs ───────────────────────────────────────────────────────
-# Read from state.categorized_comments, filtered against state.decisions.
-# An MF is "unaddressed" when it's in categorized_comments[kind=must-fix]
-# and NOT in decisions[mf_id].
+# ── top undecided threads ─────────────────────────────────────────────────────
+# Read from state.open_threads, filtered against state.decisions.
+# A thread is "undecided" when it's in open_threads and NOT in decisions[thread_id].
 if [ "$BRIEF" -eq 0 ]; then
-  TOP_MF=$(jq -r '
-    (.categorized_comments // []) as $cc |
+  TOP=$(jq -r '
+    (.open_threads // []) as $ot |
     (.decisions // []) as $dec |
-    ($dec | map(.mf_id)) as $done_ids |
-    $cc[] | select(.kind == "must-fix") | select(.id as $id | $done_ids | index($id) | not) |
-    "  \(.id)  \(.file_path)\(if .line then ":\(.line)" else "" end)\(if .reviewer then " · \(.reviewer)" else "" end)"
+    ($dec | map(.thread_id)) as $done_ids |
+    $ot[] | select(.id as $id | $done_ids | index($id) | not) |
+    "  \(.id)  \(.file_path // "general")\(if .line then ":\(.line)" else "" end)\(if .reviewer then " · \(.reviewer)" else "" end)"
   ' "$STATE" 2>/dev/null | head -3)
-  if [ -n "$TOP_MF" ]; then
-    REMAINING=$((MF_TOTAL - MF_DONE))
+  if [ -n "$TOP" ]; then
     echo "$HR_THIN"
-    echo "  Unaddressed must-fix (top 3 of $REMAINING remaining)"
+    echo "  Undecided threads (top 3 of $UNDECIDED_N remaining)"
     echo "$HR_THIN"
-    echo "$TOP_MF"
+    echo "$TOP"
     echo
   fi
 fi
@@ -162,47 +161,42 @@ case "$PHASE" in
     echo "    bash \$CLAUDE_PLUGIN_ROOT/scripts/pr-stage-complete.sh $PR_ID"
     ;;
   1)
-    # Find the first MF in categorized_comments that has no decision yet.
+    # First undecided open_thread.
     NEXT=$(jq -c '
-      (.categorized_comments // []) as $cc |
+      (.open_threads // []) as $ot |
       (.decisions // []) as $dec |
-      ($dec | map(.mf_id)) as $done_ids |
-      [$cc[] | select(.kind == "must-fix") | select(.id as $id | $done_ids | index($id) | not)] |
+      ($dec | map(.thread_id)) as $done_ids |
+      [$ot[] | select(.id as $id | $done_ids | index($id) | not)] |
       first // empty
     ' "$STATE" 2>/dev/null)
     echo "  Consultative ADDRESS loop — present in chat, dev decides, you apply."
     if [ -n "$NEXT" ] && [ "$NEXT" != "null" ]; then
       NEXT_ID=$(jq -r '.id // empty' <<<"$NEXT")
-      NEXT_FILE=$(jq -r '.file_path // empty' <<<"$NEXT")
+      NEXT_FILE=$(jq -r '.file_path // "general"' <<<"$NEXT")
       NEXT_LINE=$(jq -r '.line // empty' <<<"$NEXT")
       NEXT_EXCERPT=$(jq -r '.comment_excerpt // empty' <<<"$NEXT" | head -c 90)
       echo "    Next:  $NEXT_ID  ·  $NEXT_FILE${NEXT_LINE:+:$NEXT_LINE}"
       [ -n "$NEXT_EXCERPT" ] && echo "           “$NEXT_EXCERPT…”"
-      echo "    1. Read state.categorized_comments[] entry for $NEXT_ID"
+      echo "    1. Read state.open_threads[] entry for $NEXT_ID"
       echo "    2. Read each skill listed under .relevant_skills (cross-plugin OK)"
-      echo "    3. Print MF block in chat (excerpt + file:line + proposed approach)"
-      echo "    4. Ask dev:  approve / different / skip / show-alternatives / show-related-code"
-      echo "    5. On approve → edit in worktree → commit → append to state.decisions"
-      echo "       → bump state.must_fix_addressed"
+      echo "    3. Print thread block in chat (excerpt + file:line + proposed approach)"
+      echo "    4. Ask dev:  approve / different / reply: <text> / skip / show alternatives / show related code"
+      echo "    5. On approve+code → edit in worktree → commit → append decision (applied)"
+      echo "       On approve+reply or 'reply: <text>' → append decision (reply), no commit"
+      echo "       On skip → append decision (deferred)"
       echo "    Dev can say 'approve all' at start to fall through to autonomous mode."
     else
-      echo "    All MFs decided. Run the gate to advance to HANDOFF."
+      echo "    All threads decided. Run the gate to finalize ADDRESS:"
     fi
     echo "    State (jq-readable):"
-    echo "      .notes/state.json   .categorized_comments  /  .decisions"
+    echo "      .notes/state.json   .open_threads  /  .decisions"
     echo "    Gate:  bash \$CLAUDE_PLUGIN_ROOT/scripts/pr-stage-complete.sh $PR_ID"
     ;;
   2)
-    echo "  Write the developer's HANDOFF sheet:"
-    echo "    Render .notes/handoff.md from"
-    echo "       \$CLAUDE_PLUGIN_ROOT/skills/address-pr-comments/handoff.template.md"
-    echo "    Gate:  bash \$CLAUDE_PLUGIN_ROOT/scripts/pr-stage-complete.sh $PR_ID"
-    ;;
-  3)
-    echo "  Phase 3 reached — your work in this cs pane is done."
-    echo "    Read   .notes/handoff.md"
+    echo "  Phase 2 reached — your work in this cs pane is done."
     echo "    Push:  git -C $WT push origin $SRC"
-    echo "    Then reply to each thread on ADO using the drafts in .notes/handoff.md."
+    echo "    Reply on ADO using each decision's reply_text / deferred_reason"
+    echo "    (see the end-of-ADDRESS summary that was printed in chat)."
     echo
     echo "  If reviewer comes back with more:"
     echo "    /data-engineer-plugin:fix-pr $PR_ID --refresh"

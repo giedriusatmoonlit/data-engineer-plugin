@@ -5,17 +5,19 @@
 # is done. Validates the on-disk artifacts the phase requires, then
 # atomically advances pr_notes/<PR_ID>/state.json to the next phase.
 #
-# Three phases (PRs aren't 7-stage scrapers):
+# Two phases (PRs aren't 7-stage scrapers):
 #
-#   0 → 1   TRIAGE      pr_packet.json + comments.md + plan.md written
-#                       state.must_fix_total recorded
-#   1 → 2   ADDRESS     every must-fix is [x] in comments.md
-#                       commits exist since state.head_sha_at_triage
-#                       worktree is clean (no uncommitted edits)
-#   2 → 3   HANDOFF     handoff.md exists (developer's push checklist)
+#   0 → 1   TRIAGE      pr_packet.json cached; state.open_threads[]
+#                       written with every active ADO thread
+#   1 → 2   ADDRESS     every open_threads entry has a decision
+#                       (applied / reply / deferred); applied decisions
+#                       have real commit_sha in triage..HEAD; worktree
+#                       is clean
 #
-# Phase 3 is terminal *for this command*. Push + ADO comment-replies are
-# intentionally human actions; fix-pr does not automate them.
+# Phase 2 is terminal *for this command*. fix-pr prints an in-chat
+# summary at the end of ADDRESS (no handoff.md file). Push + ADO
+# comment-replies are intentionally human actions; fix-pr does not
+# automate them.
 #
 # Usage:
 #   pr-stage-complete.sh <PR_ID|NNNN|#NNNN>             # auto from state.phase
@@ -90,27 +92,30 @@ check_state_field() {
 case "$FROM" in
   0)
     # TRIAGE done: pr_packet.json cached; state.json has all the
-    # canonical fields populated AND a categorized_comments array
-    # listing every MF/NIT/Q the model intends to address.
+    # canonical fields populated AND an open_threads array listing
+    # every active ADO thread.
     check_file_nonempty "$PR_DIR/pr_packet.json" "pr_packet.json"
     check_state_field   '.pr_id'                 "pr_id"
     check_state_field   '.pr_url'                "pr_url"
     check_state_field   '.source_branch'         "source_branch"
     check_state_field   '.head_sha_at_triage'    "head_sha_at_triage"
-    check_state_field   '.must_fix_total'        "must_fix_total"
-    # categorized_comments[] must exist (may be empty for a PR with
-    # nothing actionable, but the array MUST be present + reflect the
-    # counters).
-    CC_LEN=$(jq -r '.categorized_comments | length // 0' "$STATE" 2>/dev/null || echo 0)
-    if [ "$CC_LEN" = "null" ] || [ -z "$CC_LEN" ]; then
-      FAILS=$((FAILS+1)); FAIL_MSGS+=("state.categorized_comments missing — triage didn't write it")
+    # open_threads[] must exist (may be empty for a PR with no comments,
+    # but the array MUST be present). Reject the old categorized_comments
+    # shape outright so stale triage outputs surface here.
+    HAS_OT=$(jq -r 'has("open_threads")' "$STATE" 2>/dev/null || echo false)
+    if [ "$HAS_OT" != "true" ]; then
+      FAILS=$((FAILS+1)); FAIL_MSGS+=("state.open_threads missing — triage didn't write it")
     fi
-    # Counters must match the categorized array (sanity check).
-    MF_EXPECT=$(jq -r '.must_fix_total // 0' "$STATE")
-    MF_IN_ARRAY=$(jq -r '[.categorized_comments[] | select(.kind == "must-fix")] | length' "$STATE" 2>/dev/null || echo 0)
-    if [ "$MF_EXPECT" != "$MF_IN_ARRAY" ]; then
+    if jq -e 'has("categorized_comments")' "$STATE" >/dev/null 2>&1; then
       FAILS=$((FAILS+1))
-      FAIL_MSGS+=("must_fix_total ($MF_EXPECT) doesn't match categorized_comments[kind=must-fix] count ($MF_IN_ARRAY)")
+      FAIL_MSGS+=("state.categorized_comments is the old shape — TRIAGE must emit open_threads[] only (no classification)")
+    fi
+    # open_threads_total must match the array length.
+    OT_EXPECT=$(jq -r '.open_threads_total // 0' "$STATE")
+    OT_IN_ARRAY=$(jq -r '.open_threads | length // 0' "$STATE" 2>/dev/null || echo 0)
+    if [ "$OT_EXPECT" != "$OT_IN_ARRAY" ]; then
+      FAILS=$((FAILS+1))
+      FAIL_MSGS+=("open_threads_total ($OT_EXPECT) doesn't match open_threads[] length ($OT_IN_ARRAY)")
     fi
     ;;
   1)
@@ -119,28 +124,39 @@ case "$FROM" in
     if [ -n "$WT" ] && [ ! -d "$WT" ]; then
       FAILS=$((FAILS+1)); FAIL_MSGS+=("worktree_path doesn't exist on disk: $WT")
     fi
-    TOTAL=$(jq -r '.must_fix_total // 0' "$STATE")
-    DONE=$(jq -r  '.must_fix_addressed // 0' "$STATE")
-    if [ "$DONE" -lt "$TOTAL" ]; then
-      FAILS=$((FAILS+1))
-      FAIL_MSGS+=("must_fix_addressed ($DONE) < must_fix_total ($TOTAL) — finish the remaining items")
-    fi
-    # Every MF in categorized_comments must have a decision (applied or deferred).
+    # Every open_threads entry must have a decision (applied/reply/deferred).
     UNDECIDED=$(jq -r '
-      (.categorized_comments // []) as $cc |
+      (.open_threads // []) as $ot |
       (.decisions // []) as $dec |
-      [$cc[] | select(.kind == "must-fix") | .id] - [$dec[] | .mf_id] | length
+      [$ot[] | .id] - [$dec[] | .thread_id] | length
     ' "$STATE" 2>/dev/null || echo 0)
     if [ "$UNDECIDED" -gt 0 ]; then
       FAILS=$((FAILS+1))
-      FAIL_MSGS+=("$UNDECIDED must-fix item(s) have no decision in state.decisions[]")
+      FAIL_MSGS+=("$UNDECIDED open thread(s) have no decision in state.decisions[]")
+    fi
+    # state.addressed should equal count(applied) + count(reply).
+    EXPECT_ADDR=$(jq -r '[.decisions[]? | select(.action == "applied" or .action == "reply")] | length' "$STATE" 2>/dev/null || echo 0)
+    GOT_ADDR=$(jq -r '.addressed // 0' "$STATE")
+    if [ "$GOT_ADDR" != "$EXPECT_ADDR" ]; then
+      FAILS=$((FAILS+1))
+      FAIL_MSGS+=("state.addressed ($GOT_ADDR) doesn't match count of applied+reply decisions ($EXPECT_ADDR)")
+    fi
+    # Every reply decision must have non-empty reply_text.
+    BAD_REPLIES=$(jq -r '[.decisions[]? | select(.action == "reply" and ((.reply_text // "") == "")) | .thread_id] | join(", ")' "$STATE" 2>/dev/null)
+    if [ -n "$BAD_REPLIES" ] && [ "$BAD_REPLIES" != "null" ]; then
+      FAILS=$((FAILS+1))
+      FAIL_MSGS+=("reply decision(s) with empty reply_text: $BAD_REPLIES")
     fi
     if [ -n "$WT" ] && [ -d "$WT" ]; then
       TRIAGE_SHA=$(jq -r '.head_sha_at_triage // empty' "$STATE")
       CURR_SHA=$(git -C "$WT" rev-parse HEAD 2>/dev/null || echo "")
-      if [ -n "$TRIAGE_SHA" ] && [ -n "$CURR_SHA" ] && [ "$TRIAGE_SHA" = "$CURR_SHA" ]; then
-        FAILS=$((FAILS+1))
-        FAIL_MSGS+=("no new commits since triage (HEAD still at $TRIAGE_SHA) — commit your edits before completing ADDRESS")
+      # New commits required only if at least one decision is "applied".
+      APPLIED_COUNT=$(jq -r '[.decisions[]? | select(.action == "applied")] | length' "$STATE" 2>/dev/null || echo 0)
+      if [ "$APPLIED_COUNT" -gt 0 ]; then
+        if [ -n "$TRIAGE_SHA" ] && [ -n "$CURR_SHA" ] && [ "$TRIAGE_SHA" = "$CURR_SHA" ]; then
+          FAILS=$((FAILS+1))
+          FAIL_MSGS+=("no new commits since triage (HEAD still at $TRIAGE_SHA) but $APPLIED_COUNT applied decision(s) recorded — commit your edits")
+        fi
       fi
       DIRTY=$(git -C "$WT" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
       if [ "$DIRTY" -gt 0 ]; then
@@ -148,43 +164,30 @@ case "$FROM" in
         FAIL_MSGS+=("worktree has $DIRTY uncommitted change(s); commit or discard before completing ADDRESS")
       fi
       # Every applied decision must reference a real commit between triage..HEAD.
-      # This blocks the failure mode where the model fabricates decisions in
+      # Blocks the failure mode where the model fabricates decisions in
       # one synthetic burst without actually committing the work.
       if [ -n "$TRIAGE_SHA" ] && [ -n "$CURR_SHA" ] && [ "$TRIAGE_SHA" != "$CURR_SHA" ]; then
-        # Real SHAs landed since triage. Build a set of them for membership tests.
         REAL_SHAS=$(git -C "$WT" rev-list "$TRIAGE_SHA..HEAD" 2>/dev/null || echo "")
         # For each applied decision, check its commit_sha is present AND non-empty.
-        BAD=$(jq -r '
-          (.decisions // [])
-          | map(select(.action == "applied"))
-          | map(select((.commit_sha // "") == "") | .mf_id) as $missing
-          | [.[] | .commit_sha // empty] as $declared
-          | {missing: $missing, declared: $declared}
-          | @json
-        ' "$STATE" 2>/dev/null)
-        MISSING=$(jq -r '.missing // [] | length' <<<"$BAD" 2>/dev/null || echo 0)
-        if [ "${MISSING:-0}" -gt 0 ]; then
-          MIDS=$(jq -r '.missing | join(", ")' <<<"$BAD")
+        MISSING=$(jq -r '[.decisions[]? | select(.action == "applied" and ((.commit_sha // "") == "")) | .thread_id] | join(", ")' "$STATE" 2>/dev/null)
+        if [ -n "$MISSING" ] && [ "$MISSING" != "null" ]; then
           FAILS=$((FAILS+1))
-          FAIL_MSGS+=("applied decision(s) with no commit_sha: $MIDS — every applied MF must record the real commit it landed in")
+          FAIL_MSGS+=("applied decision(s) with no commit_sha: $MISSING — every applied thread must record the real commit it landed in")
         fi
         # Check each declared commit_sha actually exists in triage..HEAD.
         while IFS= read -r sha; do
           [ -z "$sha" ] && continue
           if ! grep -q "^$sha\$" <<<"$REAL_SHAS"; then
-            MID=$(jq -r --arg s "$sha" '.decisions[] | select(.commit_sha == $s) | .mf_id' "$STATE" 2>/dev/null | head -1)
+            TID=$(jq -r --arg s "$sha" '.decisions[] | select(.commit_sha == $s) | .thread_id' "$STATE" 2>/dev/null | head -1)
             FAILS=$((FAILS+1))
-            FAIL_MSGS+=("decision $MID claims commit_sha=$sha, but that SHA isn't in $TRIAGE_SHA..HEAD — fabricated or wrong worktree?")
+            FAIL_MSGS+=("decision $TID claims commit_sha=$sha, but that SHA isn't in $TRIAGE_SHA..HEAD — fabricated or wrong worktree?")
           fi
         done < <(jq -r '.decisions[]? | select(.action == "applied") | .commit_sha // empty' "$STATE" 2>/dev/null)
       fi
     fi
     ;;
-  2)
-    check_file_nonempty "$PR_DIR/handoff.md" "handoff.md"
-    ;;
   *)
-    die "Unknown FROM phase: $FROM (valid: 0..2)"
+    die "Unknown FROM phase: $FROM (valid: 0..1)"
     ;;
 esac
 
@@ -194,24 +197,26 @@ next_phase_guide() {
   case "$from" in
     0)
       cat <<'EOF'
-NEXT — Phase 1 (TRIAGE): fetch + categorize PR comments into state.json.
+NEXT — Phase 1 (TRIAGE): fetch PR comments and list every open thread.
   • Apply the address-pr-comments skill (SKILL.md has the full recipe)
   • Fetch the PR with az:
       az repos pr show         --id <N> --output json
       az repos pr list-comments --id <N> --output json
     Combine into .notes/pr_packet.json
-  • Categorize threads in memory (MF / NIT / Q / RESOLVED). For each
-    actionable thread, append an object to .notes/state.json under
-    .categorized_comments with:
-      { id: "MF-1" | "NIT-1" | "Q-1",
-        kind: "must-fix" | "nit" | "question",
-        thread_id, file_path, line, reviewer, comment_excerpt, thread_url,
+  • Filter ADO threads: keep status=active; drop fixed/wontFix/closed/
+    byDesign/pending. For each kept thread, append to state.open_threads:
+      { id: "T-1" (sequential),
+        thread_id: <ADO numeric>,
+        file_path, line, reviewer, comment_excerpt, thread_url,
+        status: "active",
         relevant_skills: ["api-scraper:scraper-rules", ...] }
+  • NO classification (no MF/NIT/Q tags). The dev decides per thread
+    during ADDRESS what each one warrants.
   • Also set state.json: pr_id, pr_url, source_branch, target_branch,
     head_sha_at_triage, ticket_id (parsed DAT-NNN if found),
-    must_fix_total, nits_total, questions_total, last_known_vote,
+    open_threads_total, addressed: 0, last_known_vote,
     comments_fetched_at, decisions: []
-  • NO markdown files written. The model presents per-MF blocks
+  • NO markdown files written. The model presents per-thread blocks
     directly in chat during ADDRESS.
   • Re-run: bash $CLAUDE_PLUGIN_ROOT/scripts/pr-stage-complete.sh <PR_ID>
 EOF
@@ -219,43 +224,29 @@ EOF
     1)
       cat <<'EOF'
 NEXT — Phase 2 (ADDRESS): consultative loop, in-chat.
-  • Walk state.categorized_comments[] one MF at a time (in array order)
-  • Skip MFs that already appear in state.decisions[] (resume safe)
-  • For each undecided MF:
-      1. Print the MF block in chat: comment_excerpt, file:line, reviewer,
-         your proposed approach (1 paragraph), open question if any
-      2. Read each skill in .relevant_skills (cross-plugin, e.g.
-         api-scraper:scraper-rules). Resolve via:
+  • Walk state.open_threads[] one thread at a time (in array order)
+  • Skip threads already in state.decisions[] (resume safe)
+  • For each undecided thread:
+      1. Print the block in chat: comment_excerpt, file:line, reviewer,
+         your proposed approach (1 paragraph) — code change OR reply
+         text OR defer suggestion. Open question if any.
+      2. Read each skill in .relevant_skills (cross-plugin). Resolve via:
             ls $HOME/.claude-work/plugins/cache/<plugin>/<plugin>/*/skills/<name>/SKILL.md
-      3. Ask dev: approve / different: <text> / skip / show-alternatives
-         / show-related-code
-      4. On approve: edit in worktree → commit ("review: address MF-N (...)")
-         → append a decision object to state.decisions[]:
-            { mf_id, action: "applied", commit_sha, applied_summary,
-              dev_note?: <text if overridden>, decided_at }
-         → bump state.must_fix_addressed
-      5. On skip: append { mf_id, action: "deferred", deferred_reason, decided_at }
-         Does NOT bump must_fix_addressed → gate refuses to advance until
-         either applied or removed from .categorized_comments
-  • Worktree must end clean. NEW commits required since head_sha_at_triage.
-  • Nits = same loop (approve/skip only). Questions = reply text only —
-    add to state.decisions as { kind:"question", reply_text, decided_at }.
-  • Re-run: bash $CLAUDE_PLUGIN_ROOT/scripts/pr-stage-complete.sh <PR_ID>
-EOF
-      ;;
-    2)
-      cat <<'EOF'
-NEXT — Phase 3 (HANDOFF): write the developer's push checklist.
-  • Render .notes/handoff.md from the
-    skills/address-pr-comments/handoff.template.md template. Fill in:
-      - New commit SHAs since triage (one line each, with subject)
-      - Per-MF mapping (commit → MF-N)
-      - Nit summary (addressed in this round vs deferred)
-      - Question reply DRAFTS (one per Q-N) for the developer to paste on ADO
-      - Exact push command: git -C <worktree> push origin <source_branch>
-      - Exact ADO thread URLs to reply on
-  • This file is the human's takeover sheet. fix-pr never pushes and never
-    replies to ADO threads — that's a deliberate stop-line.
+      3. Ask dev: approve / different: <text> / reply: <text> /
+         skip / show alternatives / show related code
+      4. On approve+code: edit in worktree → commit
+            ("review: address T-N (...)")
+         → append decision { thread_id, action:"applied", commit_sha,
+            applied_summary, dev_note?, decided_at } → bump state.addressed
+      5. On approve+reply or `reply: <text>`: append
+            { thread_id, action:"reply", reply_text, decided_at }
+         → bump state.addressed (no commit needed)
+      6. On skip: append
+            { thread_id, action:"deferred", deferred_reason, decided_at }
+         Does NOT bump state.addressed. Gate refuses Phase 2 until every
+         open_threads entry has a decision.
+  • Worktree must end clean. New commits required only if any decision
+    is "applied" — pure reply/deferred runs need no commits.
   • Re-run: bash $CLAUDE_PLUGIN_ROOT/scripts/pr-stage-complete.sh <PR_ID>
 EOF
       ;;
@@ -283,15 +274,14 @@ TMP=$(mktemp)
 PHASE_NAME=$(case "$TO" in
   1) echo "triaged" ;;
   2) echo "addressed" ;;
-  3) echo "handed-off" ;;
   *) echo "unknown" ;;
 esac)
 jq --argjson phase "$TO" --arg name "$PHASE_NAME" --arg ts "$(now_iso)" \
    '. + {phase: $phase, phase_name: $name, advanced_at: $ts}' "$STATE" > "$TMP" && mv "$TMP" "$STATE"
 
 green "PR Phase $FROM → $TO complete for $PR_ID (advanced to phase $TO / $PHASE_NAME)"
-if [ "$TO" -lt 3 ]; then
+if [ "$TO" -lt 2 ]; then
   echo "  → Re-run pr-stage-complete.sh $PR_ID to validate the Phase $TO → $((TO+1)) gate."
 else
-  echo "  → Phase 3 is terminal for fix-pr. Read handoff.md, then push + reply manually."
+  echo "  → Phase 2 is terminal for fix-pr. Print the end-of-ADDRESS summary in chat, then push + reply manually."
 fi

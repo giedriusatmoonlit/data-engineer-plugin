@@ -10,14 +10,18 @@ Bulk PR onboarding for ADO PRs. Light orchestrator: for every input
 PR, creates a fresh worktree at `<repo>-pr-NNNN` and spawns a
 claude-squad session in it. Each spawned session then **self-triages**
 as Phase 0→1 of `/data-engineer-plugin:fix-pr` — fetches via `az`,
-categorizes comments in memory, writes `.notes/pr_packet.json` (the az
-cache) and structured arrays into `.notes/state.json`.
+filters threads by status, writes `.notes/pr_packet.json` (the az
+cache) and a flat `open_threads[]` array into `.notes/state.json`.
 
-Per-PR notes live in `<worktree>/.notes/`. Only two files: `state.json`
-(structured: pr metadata + `categorized_comments[]` + `decisions[]`)
-and `pr_packet.json` (raw az for `--refresh` diffing). Plus `handoff.md`
-written at Phase 3. **No** `comments.md` / `plan.md` — the per-MF
-conversation lives in chat.
+**No classification** — every active ADO thread becomes one entry in
+`open_threads[]`. The dev decides per thread during ADDRESS what each
+one warrants (code change / reply / defer).
+
+Per-PR notes live in `<worktree>/.notes/`. Two files: `state.json`
+(structured: pr metadata + `open_threads[]` + `decisions[]`) and
+`pr_packet.json` (raw az for `--refresh` diffing). **No** `handoff.md`,
+`comments.md`, or `plan.md` — the per-thread conversation and the
+end-of-ADDRESS summary both live in chat.
 
 Batch metadata (which spans multiple PRs) stays at
 `$DATA_ENG_WORK_ROOT/pr_notes/_batch/<BATCH_ID>/`.
@@ -47,16 +51,15 @@ Optional flags:
                        for the batch's PRs and re-spawn fresh.
 ```
 
-## Three phases per PR (set by /fix-pr)
+## Two phases per PR (set by /fix-pr)
 
-| Phase | Done by             | What | Gate                          |
-|-------|---------------------|------|-------------------------------|
-| 0→1   | spawned pane (not this command) | TRIAGE: pr_packet.json + state.categorized_comments[] | every active thread categorized |
-| 1→2   | /fix-pr in cs pane  | ADDRESS: edits + commits in worktree | all MFs `[x]`, tree clean, new commits |
-| 2→3   | /fix-pr in cs pane  | HANDOFF: handoff.md for the developer | handoff.md non-empty |
+| Phase | Done by                          | What | Gate                                              |
+|-------|----------------------------------|------|---------------------------------------------------|
+| 0→1   | spawned pane (not this command)  | TRIAGE: pr_packet.json + state.open_threads[]    | every active thread listed in open_threads        |
+| 1→2   | /fix-pr in cs pane               | ADDRESS: per-thread decisions + commits (when applied) | every open_threads entry has a decision; tree clean |
 
-After phase 3, the developer (human) pushes + replies on ADO. `fix-pr`
-never automates those.
+After phase 2, the developer (human) pushes + replies on ADO using
+the in-chat end-of-ADDRESS summary. `fix-pr` never automates those.
 
 ## Preflight checks
 
@@ -85,7 +88,7 @@ Before any work:
 2. **Read prior state per PR**: for each, check
    `<worktree>/.notes/state.json` if the worktree already exists at
    `<worktree-parent>/<repo>-pr-NNNN/` (resume case). Parse `phase`,
-   `batch_id`, `awaiting_human`, `must_fix_addressed/total`. For PRs
+   `batch_id`, `awaiting_human`, `addressed/open_threads_total`. For PRs
    with no worktree on disk yet, this is a fresh entry.
 3. **Resolve or generate BATCH_ID**:
    - All same `batch_id` → re-run that batch (same as `--refresh`)
@@ -98,7 +101,7 @@ Before any work:
    |-----------|----------|------------------|-----------|
    | PR-2299   | DAT-591  | 1 (triaged)      | spawn cs (resume at ADDRESS) |
    | PR-2301   | DAT-605  | 0 (no state)     | triage + spawn cs |
-   | PR-2305   | DAT-612  | 2 (addressed)    | spawn cs (resume at HANDOFF) |
+   | PR-2305   | DAT-612  | 2 (addressed)    | already done — re-spawn only if you want to refresh |
    ```
 5. **Skip master-side triage.** Triage now happens in each spawned
    pane (Phase 0→1 of `/fix-pr`), where the model has cwd = worktree
@@ -114,7 +117,7 @@ Before any work:
      "ado_project": "...",
      "prs": [
        {"pr_id":"PR-2299","ticket_id":"DAT-591","source_branch":"...","target_branch":"master",
-        "pr_url":"...","head_sha":"...","must_fix_total":3,"phase":1}
+        "pr_url":"...","head_sha":"...","open_threads_total":3,"phase":1}
      ]
    }
    ```
@@ -140,13 +143,13 @@ Re-render the table from existing `batch.json`. No diagnosis, no fan-out.
 
 Re-run `az repos pr show` + `list-comments` for every PR in the batch.
 Diff against the cached `pr_packet.json`:
-- New comments → append fresh entries to `state.categorized_comments`
-  with new ids (continuing the sequence MF-4, MF-5, ...)
-- Resolved threads (since last fetch) → remove from
-  `categorized_comments` and record in `resolved_threads[]`
+- New threads → append fresh entries to `state.open_threads` with new
+  ids (continuing the sequence T-N+1, T-N+2, ...)
+- Resolved threads (since last fetch) → remove from `open_threads`
+  and record in `resolved_threads[]` (preserve T-N id)
 - Existing threads with new replies → update `comment_excerpt` to
   prepend "[NEW reply from @reviewer]"; preserve any decision already
-  in `decisions[]` (don't re-ask the dev about settled MFs)
+  in `decisions[]` (don't re-ask the dev about settled threads)
 - Push-since-triage detection: if the PR's `head_sha` differs from
   `state.head_sha_at_triage`, set `state.head_sha_drift` — the
   developer needs to decide whether to rebase the worktree or accept
@@ -161,19 +164,19 @@ that batch's PRs before re-spawning.
 
 ### `--dry-run`
 
-Triage only. Diagnose each PR, print disposition (counts of MF/NIT/Q,
-parsed ticket id if any), **no** writes to disk, **no** fan-out.
+Resolve PR list, print prior state per PR, **no** writes to disk, **no**
+fan-out, no `az` calls beyond what's already cached.
 
 ## Output (developer-facing, post-completion)
 
 ```
 Batch PB-2026-05-11-01 complete.
 
-| PR        | Ticket   | MF  | NIT | Q   | Phase            | Next |
-|-----------|----------|-----|-----|-----|------------------|------|
-| PR-2299   | DAT-591  |  3  |  2  |  1  | 1 (triaged)      | cs pane open; /fix-pr will resume at ADDRESS |
-| PR-2301   | DAT-605  |  5  |  4  |  0  | 1 (triaged)      | cs pane open |
-| PR-2305   | DAT-612  |  0  |  0  |  0  | (auto-handed-off) | nothing to address |
+| PR        | Ticket   | Open | Phase           | Next |
+|-----------|----------|------|-----------------|------|
+| PR-2299   | DAT-591  |   6  | 1 (triaged)     | cs pane open; /fix-pr resumes at ADDRESS |
+| PR-2301   | DAT-605  |   9  | 1 (triaged)     | cs pane open |
+| PR-2305   | DAT-612  |   0  | 2 (addressed)   | nothing open — re-spawn only on --refresh |
 
 Batch report:  $DATA_ENG_WORK_ROOT/pr_notes/_batch/PB-.../batch.json
 Cursor:        cursor $DATA_ENG_WORK_ROOT/pr_notes/_batch/PB-.../batch.code-workspace
@@ -181,11 +184,11 @@ Cursor:        cursor $DATA_ENG_WORK_ROOT/pr_notes/_batch/PB-.../batch.code-work
 
 ## What this command does NOT do
 
-- ❌ Push the branches — that's `/fix-pr`'s handoff, executed by the dev
+- ❌ Push the branches — the dev pushes after fix-pr's in-chat summary
 - ❌ Reply to ADO threads via API
 - ❌ Approve / complete / abandon PRs
 - ❌ Edit any code — only writes batch metadata under `pr_notes/_batch/` + spawns sessions. Per-PR notes are written by each session into its own worktree.
-- ❌ Spawn anything other than the triage work and `launch-pr-batch.sh`
+- ❌ Spawn anything other than `launch-pr-batch.sh`
 
 ## Implementation notes for the model running this command
 
@@ -194,15 +197,13 @@ Cursor:        cursor $DATA_ENG_WORK_ROOT/pr_notes/_batch/PB-.../batch.code-work
 3. State scan: read each PR's `<worktree>/.notes/state.json` if the worktree exists on disk.
 4. Resolve BATCH_ID.
 5. Print the pre-spawn status table.
-6. For `--status` / `--report`, exit here.
-7. For everything else, run the per-PR triage loop. For each PR at
-   phase 0, use the **`address-pr-comments`** skill — its `SKILL.md`
-   has the canonical categorization rules and ADO API call shapes.
-8. Write `batch.json` once all triage is done.
-9. Print the completion table.
-10. Unless `--no-launch` / `--status` / `--report` / `--dry-run`, run
+6. For `--status` / `--report` / `--dry-run`, exit here.
+7. Write `batch.json` from the resolved PR list.
+8. Print the completion table.
+9. Unless `--no-launch` / `--status` / `--report` / `--dry-run`, run
     `launch-pr-batch.sh <BATCH_ID>` and append its output verbatim.
 
-Do **not** spawn arbitrary Task agents from this command. The triage is
-small enough to run inline (one PR ≈ a few `az` calls + categorization);
-the launcher handles all session spawning.
+Triage runs **inside** each spawned cs pane (Phase 0→1 of `/fix-pr`),
+not in this command. The launcher creates the worktree, queues
+`/fix-pr PR-NNNN`, and that pane fetches comments + writes `.notes/`
+with cwd = the worktree.

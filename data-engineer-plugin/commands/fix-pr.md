@@ -1,5 +1,5 @@
 ---
-description: Per-PR in-session command. Walks one ADO PR through three phases — triage comments → make + commit fixes → write developer handoff. Stops before push and before any ADO comment reply. Spawned automatically by /address-pr into each cs-work pane; can also be run directly.
+description: Per-PR in-session command. Walks one ADO PR through two phases — triage comments → consultative per-thread address loop. Stops before push and before any ADO comment reply. Spawned automatically by /address-pr into each cs-work pane; can also be run directly.
 argument-hint: <PR-NNNN|NNNN|#NNNN> [--refresh]
 allowed-tools: Bash, Read, Write, Edit, Grep, Glob
 ---
@@ -11,19 +11,21 @@ Per-PR state machine. Takes the **PR id** (any of `2299`, `#2299`,
 `.notes/state.json` (inside the PR's worktree), runs the next phase, validates the gate
 via `pr-stage-complete.sh`, advances.
 
-Same shape as `api-scraper`'s `/make-scraper` but for PRs — three
-phases instead of seven stages, and it deliberately **stops before
-push and before ADO replies**.
+Same shape as `api-scraper`'s `/make-scraper` but for PRs — two phases
+instead of seven stages, and it deliberately **stops before push and
+before ADO replies**.
 
-## The three phases
+## The two phases
 
-| Phase | Name      | What you produce                              | Gate                                   |
-|-------|-----------|-----------------------------------------------|----------------------------------------|
-| 0 → 1 | TRIAGE    | pr_packet.json, comments.md, plan.md          | every comment categorized; plan ordered |
-| 1 → 2 | ADDRESS   | new commits in the worktree, MFs checked off  | must_fix_addressed == must_fix_total + clean tree + commits since triage |
-| 2 → 3 | HANDOFF   | handoff.md (developer's push checklist)       | handoff.md non-empty                   |
+| Phase | Name      | What you produce                                | Gate                                                    |
+|-------|-----------|-------------------------------------------------|---------------------------------------------------------|
+| 0 → 1 | TRIAGE    | pr_packet.json + open_threads[] in state.json   | every active ADO thread listed in open_threads          |
+| 1 → 2 | ADDRESS   | per-thread decisions + commits (when applicable)| every open_threads entry has a decision; commits clean  |
 
-Phase 3 is **terminal for this command**. fix-pr never:
+Phase 2 is **terminal for this command**. At the end of ADDRESS the
+model prints an in-chat summary (commits since triage, per-thread
+decision rendering, push command, ADO links). No `handoff.md` file —
+the chat IS the handoff. fix-pr never:
 - pushes the branch
 - replies to ADO comment threads
 - approves / completes / abandons the PR
@@ -52,9 +54,10 @@ Before any phase work:
 5. **Branch** — confirm the worktree is on `state.source_branch`. If
    on a different branch, refuse and surface — don't auto-switch.
 6. **--refresh** — if passed, re-run the triage `az repos pr` calls
-   and diff against cached `pr_packet.json`. Append any new comments to
-   `comments.md` as `NEW:` items (preserving existing checkbox state on
-   pre-existing items). Bump `must_fix_total` if new MFs landed.
+   and diff against cached `pr_packet.json`. Append new threads to
+   `state.open_threads[]` with fresh T-N ids (continuing the sequence;
+   preserve any `decisions[]` already recorded for pre-existing threads).
+   Bump `open_threads_total` if new threads landed.
 
 ## Orientation banner (always first, deterministic)
 
@@ -68,8 +71,9 @@ bash $CLAUDE_PLUGIN_ROOT/scripts/pr-status.sh <PR_ID>
 This is a shell script (not model-generated text), so the output is
 deterministic: PR title + URL, linked ticket, current phase + name,
 worktree health (branch, dirty/clean, commits since triage),
-must-fix / nit / question counts, the top 3 unaddressed MFs, and the
-single most useful next action for the current phase.
+open-thread counts (total / addressed / deferred / undecided), the top
+3 undecided threads, and the single most useful next action for the
+current phase.
 
 After the banner prints, state in ONE sentence what *this turn* will do.
 Then proceed.
@@ -88,27 +92,30 @@ skill inline. It will:
 
 - Fetch `az repos pr show` + `list-comments` + threads
 - Cache the JSON to `.notes/pr_packet.json` (used by `--refresh` for diffing)
-- Categorize every comment in memory: `must-fix` / `nit` / `question` /
-  `resolved` (rules in the skill)
-- Write the categorization as structured data into `.notes/state.json`:
+- Filter ADO threads by status: keep `active`, drop
+  `fixed`/`wontFix`/`closed`/`byDesign`/`pending`
+- Write the open list as structured data into `.notes/state.json` —
+  **no classification, no must-fix / nit / question tags**:
   ```json
   {
-    "categorized_comments": [
-      {"id": "MF-1", "kind": "must-fix", "thread_id": "12345",
+    "open_threads": [
+      {"id": "T-1", "thread_id": "12345",
        "file_path": "Scrapers/NO/...", "line": 128, "reviewer": "@alice",
        "comment_excerpt": "DST watermark...", "thread_url": "...",
+       "status": "active",
        "relevant_skills": ["api-scraper:scraper-rules", ...]},
       ...
     ],
+    "resolved_threads": [...],
     "decisions": []
   }
   ```
 - Populate the canonical fields: `pr_id`, `pr_url`, `pr_title`,
   `source_branch`, `target_branch`, `head_sha_at_triage`, `ticket_id`
-  (parsed DAT-NNN if found), `must_fix_total`, `nits_total`,
-  `questions_total`, `last_known_vote`, `comments_fetched_at`
+  (parsed DAT-NNN if found), `open_threads_total`, `last_known_vote`,
+  `comments_fetched_at`
 
-**No markdown files** written this phase. The per-MF presentation
+**No markdown files** written this phase. The per-thread presentation
 happens in chat during ADDRESS — no `comments.md` / `plan.md` to keep
 in sync with state.
 
@@ -124,31 +131,37 @@ defending their code against a reviewer who may be wrong, partially
 right, or asking for something not worth the cost. The chat IS the
 conversation; there is no plan.md / comments.md to maintain.
 
+**There is no must-fix / nit / question classification.** Every
+non-resolved ADO thread is one `open_threads[]` entry. You walk them
+in array order; the dev decides per thread whether it gets a code
+change, a reply, or a defer.
+
 #### Two hard rules (read before doing anything)
 
-**Rule 1 — No code change without a per-MF dev decision.**
-You may **only** apply (step 5) an MF after the dev has explicitly
-authorized that specific MF in their previous message. Steps 1–4 are
-the presentation + ask. Step 4 ends the turn — full stop. You do not
-proceed to step 5 in the same turn as step 4.
+**Rule 1 — No code change or text-only reply without a per-thread dev
+decision.**
+You may **only** apply (step 5) a decision on a thread after the dev
+has explicitly authorized that specific thread in their previous
+message. Steps 1–4 are the presentation + ask. Step 4 ends the turn —
+full stop. You do not proceed to step 5 in the same turn as step 4.
 
-After a step-5 apply + step-6 commit, you may immediately present the
-**next** MF (steps 1–4) in the same turn — this keeps the loop tight.
-But every turn must end at step 4 (a question to the dev) or at the
-phase-2 gate-advance — never with a unilateral jump to HANDOFF or with
-multiple unapproved applies.
+After a step-5 apply + step-6 record, you may immediately present the
+**next** thread (steps 1–4) in the same turn — this keeps the loop
+tight. But every turn must end at step 4 (a question to the dev) or
+at the phase-2 gate-advance — never with multiple unapproved
+decisions in a single turn.
 
 The only exception: the dev's first message in the phase is literally
 `approve all` or `auto`. In that case, fall through to autonomous mode
-for the remaining MFs in this phase (still pause for explicit
-confirmation on any Open Question items).
+for the remaining threads in this phase (still pause for explicit
+confirmation on any Open Question items the model raises).
 
-**Anti-pattern to avoid**: reading state.categorized_comments, deciding
-all the MFs are "obviously correct fixes", applying them all, and
-writing handoff.md in one turn. That bypasses Rule 1 and Rule 2 and
-defeats the entire point of the consultative loop. If you find
-yourself about to do this — stop, present the FIRST undecided MF in
-chat, ask the dev, end the turn.
+**Anti-pattern to avoid**: reading state.open_threads, deciding all
+the threads have "obvious answers", and applying every decision in
+one turn. That bypasses Rule 1 and Rule 2 and defeats the entire point
+of the consultative loop. If you find yourself about to do this —
+stop, present the FIRST undecided thread in chat, ask the dev, end
+the turn.
 
 **Rule 2 — The reviewer is not the authority. The dev is.**
 Your "proposed approach" is your own technical assessment, not a
@@ -158,18 +171,20 @@ but suggesting a worse fix than what's possible. When you propose an
 approach:
   - If you agree with the reviewer, say why and propose the concrete change.
   - If you partially agree, say which part you'd take and which you'd push back on.
-  - If you think the reviewer is wrong, say so explicitly — propose a
-    reply that explains the disagreement, not a code change. The dev
-    chooses whether to argue, concede, or compromise.
+  - If you think the reviewer is wrong, say so explicitly — propose
+    reply text that explains the disagreement, not a code change.
+    The dev chooses whether to argue, concede, or compromise.
+  - If the thread is a question (no code change implied), propose
+    draft reply text. The dev pastes it on ADO after fix-pr exits.
   - Never default to "the reviewer asked for X, so I'll do X". That
     short-circuits the dev's judgment.
 
-#### Per-MF loop
+#### Per-thread loop
 
-Read `.notes/state.json`'s `categorized_comments` array and
-`decisions` array. Find the **first** `MF-N` in `categorized_comments`
-(in array order) whose `id` is **not yet in** `decisions[].mf_id`.
-Process **only that one** this turn. Then stop.
+Read `.notes/state.json`'s `open_threads` array and `decisions` array.
+Find the **first** `T-N` in `open_threads` (in array order) whose `id`
+is **not yet in** `decisions[].thread_id`. Process **only that one**
+this turn. Then stop.
 
 1. **Read the entry** from state.json (it has comment_excerpt,
    file_path, line, reviewer, thread_url, relevant_skills).
@@ -182,21 +197,27 @@ Process **only that one** this turn. Then stop.
    Read each match. If missing: print a soft warning and continue
    without that domain knowledge.
 
-3. **Print the MF block in chat**:
-   - The comment excerpt + file:line + reviewer
-   - The code region around file:line (3-10 lines, Read'd inline)
+3. **Print the thread block in chat**:
+   - The comment excerpt + file:line + reviewer + thread_url
+   - The code region around file:line (3-10 lines, Read'd inline) — if
+     the thread is general (no file:line), skip
    - Your **proposed approach** — one paragraph. Per Rule 2, this is
-     YOUR assessment: agree / partially agree / disagree, with the
-     concrete next action. If disagreeing, propose reply text instead
-     of code.
+     YOUR assessment. Pick one:
+       - **Code change**: agree / partially agree, describe the edit
+       - **Reply only**: thread is a question, or you disagree with
+         the reviewer — propose draft reply text
+       - **Defer suggestion**: out-of-scope or needs follow-up ticket
    - Open question if there's genuine ambiguity
 
-4. **Ask the dev**, one short prompt. Five options:
-   - `approve` — apply the proposed approach
+4. **Ask the dev**, one short prompt. Options:
+   - `approve` — apply the proposed approach (code change OR reply,
+     whichever the proposal was)
    - `different: <text>` — apply what the dev describes; their `<text>`
      becomes the `dev_note` on the decision
-   - `skip` — defer this MF; counter does NOT bump; gate refuses Phase 2
-     until either resolved or removed from `categorized_comments`
+   - `reply: <text>` — record a text-only reply (skip code change even
+     if the proposal was code); `<text>` becomes `reply_text`
+   - `skip` — defer this thread; gate refuses Phase 2 until either
+     decided OR removed from `open_threads`
    - `show alternatives` — propose 2-3 terse alternatives, then re-ask
    - `show related code` — Read more files, print a one-paragraph map,
      then re-ask
@@ -205,115 +226,118 @@ Process **only that one** this turn. Then stop.
 
    **STOP HERE. End the turn.** Do not proceed to step 5 until the dev
    replies. Do not preview your intended code change. Do not read more
-   files "to be ready." Do not write handoff.md. The next thing that
-   happens is the dev's reply — and nothing else. (Exception:
-   `approve all` / `auto` mode — see Rule 1.)
+   files "to be ready." The next thing that happens is the dev's reply
+   — and nothing else. (Exception: `approve all` / `auto` mode — see
+   Rule 1.)
 
-5. **(Next turn, after dev replies) Apply the approved approach**
-   (yours or the dev's override). Stay inside the worktree. Follow
-   conventions from the skills you just read.
+5. **(Next turn, after dev replies) Apply the approved approach**:
+   - **Code change**: edit in the worktree. Stay inside the worktree
+     path. Follow conventions from the skills you just read.
+   - **Reply only**: no code change. Just record the reply text in
+     state.decisions[].
 
-6. **Commit + record the decision**:
+6. **Record the decision** (atomic state update — use `pr_state_update`).
+
+   **For `applied`** (code change committed):
    ```bash
    git -C "$WORKTREE" add <files>
-   git -C "$WORKTREE" commit -m "review: address MF-N (<short>)"
+   git -C "$WORKTREE" commit -m "review: address T-N (<short>)"
    ```
-   Then append to `state.decisions[]` (atomic — use `pr_state_update`):
    ```json
    {
-     "mf_id": "MF-1",
+     "thread_id": "T-1",
      "action": "applied",
-     "commit_sha": "abc123",
+     "commit_sha": "abc1234",
      "applied_summary": "Converted to UTC via pendulum",
-     "dev_note": "<verbatim if overridden, else omit>",
+     "dev_note": "<verbatim if dev overrode the proposal, else omit>",
      "decided_at": "<iso>"
    }
    ```
-   Bump `state.must_fix_addressed` by 1 in the same `jq` expression.
+   Bump `state.addressed` by 1 in the same `jq` expression.
 
-7. **If `skip`**: append a `"deferred"` decision instead, with
-   `deferred_reason`:
+   **For `reply`** (text-only, no commit):
    ```json
-   {"mf_id": "MF-1", "action": "deferred", "deferred_reason": "...", "decided_at": "..."}
+   {
+     "thread_id": "T-1",
+     "action": "reply",
+     "reply_text": "<the text to paste on ADO>",
+     "decided_at": "<iso>"
+   }
    ```
-   Do NOT bump `must_fix_addressed`. The gate will refuse Phase 2 until
-   the deferred items are addressed OR removed from `categorized_comments`
-   (the dev's choice — if they decide it's not actually a blocker, edit
-   state.json to drop it).
+   Bump `state.addressed` by 1. No commit, no `commit_sha`.
 
-#### Nits
-
-Same loop, prompt is just `approve` / `skip` (no alternatives — nits
-don't need debate). Approved nits get committed + a decision with
-`kind: "nit"`. Skipped nits don't gate.
-
-#### Questions (Q-N)
-
-**Never code-change for a question.** They become reply text:
-
-- Show the draft reply
-- Ask: `approve / rewrite: <text> / skip`
-- Append a decision: `{kind: "question", q_id, reply_text, decided_at}`
-- The actual reply happens at HANDOFF (dev pastes on ADO); you only
-  collect text here.
+   **For `deferred`** (skipped):
+   ```json
+   {
+     "thread_id": "T-1",
+     "action": "deferred",
+     "deferred_reason": "<short>",
+     "decided_at": "<iso>"
+   }
+   ```
+   Does NOT bump `addressed`. The gate refuses Phase 2 until every
+   `open_threads` entry has a decision (applied / reply / deferred)
+   AND `addressed == count(applied) + count(reply)` matches the
+   non-deferred subset.
 
 #### Audit trail
 
-The chat history IS the audit trail. State.decisions[] is the structured
-log — every applied/deferred MF, every question reply, with timestamps
-and commit SHAs. handoff.md (built at Phase 3) renders this human-readable.
+The chat history IS the audit trail. State.decisions[] is the
+structured log — every applied / reply / deferred thread, with
+timestamps and (for applied) commit SHAs. The end-of-ADDRESS summary
+renders this human-readable directly in chat.
 
 #### Gate
 
-When every MF in `categorized_comments` has a corresponding entry in
-`decisions[]` (action="applied" or "deferred"),
-`must_fix_addressed == must_fix_total`, the worktree is clean, and at
-least one new commit exists since `head_sha_at_triage`:
+When every `T-N` in `open_threads` has a corresponding entry in
+`decisions[]` (action `applied`, `reply`, or `deferred`), the worktree
+is clean, and at least one new commit exists since `head_sha_at_triage`
+(unless every decision is `reply` or `deferred` — then no commit is
+required):
 
 ```bash
 bash $CLAUDE_PLUGIN_ROOT/scripts/pr-stage-complete.sh <PR_ID>
 ```
 
-The gate refuses to advance if any MF is undecided OR if
-`must_fix_addressed < must_fix_total` (= some MFs were deferred but not
-removed from `categorized_comments`).
+The gate refuses to advance if any thread is undecided. Every
+`applied` decision must reference a real commit_sha in `triage..HEAD`
+(fabricated SHAs are rejected). Every `reply` decision must have
+non-empty `reply_text`.
 
-### Phase 2 → 3  HANDOFF
+### End of ADDRESS — print the summary, release the lock
 
-Render `.notes/handoff.md` from
-`${CLAUDE_PLUGIN_ROOT}/skills/address-pr-comments/handoff.template.md`.
-It must contain:
+When `pr-stage-complete.sh` has advanced state to phase 2, print the
+end-of-ADDRESS summary directly in chat. **No `handoff.md` file** —
+the chat history is the handoff.
 
-- New commit SHAs since `state.head_sha_at_triage` (each with subject)
-- Per-MF mapping: which commit addresses which MF-N
-- Nit summary (this round / deferred — with explicit notes for deferred)
-- Question replies — one **draft reply per Q-N** the developer can paste
-  into the ADO thread
-- Exact push command:
-  ```
-  git -C <worktree> push origin <source_branch>
-  ```
-- Exact ADO thread URLs to reply on (one per MF-N and Q-N — for ADO
-  the comment URL is e.g.
-  `https://dev.azure.com/<org>/<project>/_git/<repo>/pullrequest/<N>?discussionId=<T>`)
+The summary contains:
 
-Then:
-```bash
-bash $CLAUDE_PLUGIN_ROOT/scripts/pr-stage-complete.sh <PR_ID>
+1. **New commits since triage** — `git log <head_sha_at_triage>..HEAD --oneline`
+2. **Per-thread render** — for each entry in `decisions[]`:
+   - `applied`: `T-N · file:line · commit_sha · applied_summary`
+   - `reply`: `T-N · thread_url` followed by the `reply_text` (so the
+     dev can copy-paste directly)
+   - `deferred`: `T-N · thread_url · deferred_reason`
+3. **Push command**:
+   ```
+   git -C <worktree> push origin <source_branch>
+   ```
+4. **ADO checklist**:
+   - For each `applied` T-N: click "Resolve" on the thread (status → fixed)
+   - For each `reply` T-N: paste the reply text on `<thread_url>`
+   - For each `deferred` T-N: decide whether to reply with the reason
+     or file a follow-up ticket
+
+Then announce:
+
 ```
+Phase 2 (ADDRESS) complete for <PR_ID>. fix-pr is done.
 
-…and announce to the developer:
-
-```
-Phase 3 (HANDOFF) reached. fix-pr is done for <PR_ID>.
-
-→ Read .notes/handoff.md
-→ Run the push command shown there
-→ Reply to each thread using the draft replies in handoff.md
-
-Re-running /data-engineer-plugin:fix-pr <PR_ID> --refresh will re-fetch
-the PR (e.g. after reviewer responds) and append any new comments as
-Phase-1 work.
+→ Run the push command above when ready
+→ Reply / resolve threads on ADO using the per-thread render
+→ /data-engineer-plugin:fix-pr <PR_ID> --refresh — re-fetch the PR after
+  reviewer responds; new threads land as fresh T-N ids, decisions[]
+  preserved.
 ```
 
 Then release the lock:
@@ -347,8 +371,8 @@ re-spawn this session.
 
 ## What this command does NOT do
 
-- ❌ Push the branch — handoff.md tells the developer how
-- ❌ Reply to ADO threads via API — handoff.md provides paste-ready drafts
+- ❌ Push the branch — the end-of-ADDRESS summary tells the developer how
+- ❌ Reply to ADO threads via API — `reply` decisions hold paste-ready text for the dev
 - ❌ Re-open / complete / abandon the PR
 - ❌ Edit anything outside `state.worktree_path` (session-guard rejects)
 - ❌ Force-push, ever

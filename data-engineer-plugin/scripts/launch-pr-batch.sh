@@ -354,10 +354,10 @@ for PR_ID in "${PRS[@]}"; do
           worktree_path:$wt, head_sha_at_triage:$sha,
           phase:0, phase_name:"fresh",
           batch_id:$bid, launched_at:$ts,
-          must_fix_total:0, must_fix_addressed:0,
-          nits_total:0, questions_total:0,
+          open_threads_total:0, addressed:0,
           awaiting_human:false,
-          categorized_comments:[],
+          open_threads:[],
+          resolved_threads:[],
           decisions:[]}' > "$STATE_FILE"
     green "  .notes/state.json initialized (phase 0)"
   else

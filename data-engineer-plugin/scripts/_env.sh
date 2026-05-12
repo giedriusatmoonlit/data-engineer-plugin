@@ -84,8 +84,7 @@ parse_dat_from() {
 # All per-PR state lives INSIDE the worktree at <worktree>/.notes/. The
 # path resolvers below derive that location from convention:
 #
-#   <worktree-parent>/<repo>-pr-NNNN/.notes/{state.json,pr_packet.json,
-#                                            comments.md, plan.md, handoff.md}
+#   <worktree-parent>/<repo>-pr-NNNN/.notes/{state.json, pr_packet.json}
 #
 # Why in-tree: notes live next to the code they're about. You see them
 # from `ls`, Cursor's file tree, ripgrep. Surviving a `git worktree
@@ -117,19 +116,18 @@ worktree_path_for_pr() {
 # Alias for readability in callers that think in "PR worktree" terms.
 pr_worktree()     { worktree_path_for_pr "$1"; }
 
-# Per-PR notes live INSIDE the worktree. Per-MF tracking lives in
-# state.json (structured: .categorized_comments + .decisions). Only two
-# human-readable files remain:
+# Per-PR notes live INSIDE the worktree. Per-thread tracking lives in
+# state.json (structured: .open_threads + .decisions). Only one file
+# is written under .notes/:
 #   - pr_packet.json  cached az response, for --refresh diffing
-#   - handoff.md      phase-3 takeover sheet for the developer
 #
-# (Earlier versions wrote comments.md + plan.md too. Both are now in
-# state.json as structured data and the model presents per-MF blocks
-# directly in chat — no markdown file to maintain mid-flight.)
+# (Earlier versions wrote comments.md, plan.md, and handoff.md too. All
+# three are gone — state.json is the structured truth and the model
+# presents per-thread blocks + the end-of-ADDRESS summary directly in
+# chat. No markdown file to maintain mid-flight.)
 pr_dir()          { echo "$(worktree_path_for_pr "$1")/.notes"; }
 pr_state_file()   { echo "$(pr_dir "$1")/state.json"; }
 pr_packet_file()  { echo "$(pr_dir "$1")/pr_packet.json"; }
-pr_handoff_md()   { echo "$(pr_dir "$1")/handoff.md"; }
 
 # Batch metadata stays under DATA_ENG_WORK_ROOT — it spans multiple PRs
 # and has no natural worktree home.
