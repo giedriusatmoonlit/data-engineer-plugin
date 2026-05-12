@@ -1,6 +1,6 @@
 {
   "name": "data-engineer-plugin",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Data engineer helpers for Claude Code. Currently ships /address-pr — a 3-phase ADO PR-review-addressing flow that parallelizes across PRs via claude-squad (triage → make+commit fixes → developer handoff; never pushes, never replies to threads). Per-PR lockfile + PreToolUse hook prevent one session from drifting into another PR's worktree. Sibling plugin to api-scraper; both can be installed together.",
   "author": {
     "name": "giedriusatmoonlit"
