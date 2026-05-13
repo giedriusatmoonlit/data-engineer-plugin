@@ -2,7 +2,7 @@
 # data-engineer-plugin · install.sh
 #
 # Light installer:
-#   1. Verifies required tools (jq, git, az, wezterm, mprocs; lazygit + cursor soft)
+#   1. Verifies required tools (jq, git, az; cursor soft)
 #   2. Creates $DATA_ENG_WORK_ROOT (default $HOME/.data-engineer-work)
 #      with pr_notes/ and pr_notes/_batch/ subdirs
 #   3. Prints recommended shell exports if any env vars are missing
@@ -28,10 +28,10 @@ cyan "── data-engineer-plugin install ──"
 # 1. tools
 hard_missing=()
 soft_missing=()
-for c in jq git az wezterm mprocs; do
+for c in jq git az; do
   command -v "$c" >/dev/null 2>&1 || hard_missing+=("$c")
 done
-for c in lazygit cursor; do
+for c in cursor; do
   command -v "$c" >/dev/null 2>&1 || soft_missing+=("$c")
 done
 if [ ${#hard_missing[@]} -gt 0 ]; then
@@ -39,18 +39,14 @@ if [ ${#hard_missing[@]} -gt 0 ]; then
   red "  jq:       https://stedolan.github.io/jq/"
   red "  git:      apt install git"
   red "  az:       https://docs.microsoft.com/cli/azure/install-azure-cli"
-  red "  wezterm:  https://wezterm.org/installation.html  (or the latest .deb from"
-  red "            https://github.com/wezterm/wezterm/releases)"
-  red "  mprocs:   https://github.com/pvolok/mprocs/releases  (drop the binary in ~/.local/bin)"
   exit 1
 fi
-green "  hard deps: jq git az wezterm mprocs ✓"
+green "  hard deps: jq git az ✓"
 if [ ${#soft_missing[@]} -gt 0 ]; then
-  yellow "  soft deps missing (multi-repo git UI / Cursor workspace): ${soft_missing[*]}"
-  yellow "    lazygit: https://github.com/jesseduffield/lazygit/releases"
+  yellow "  soft deps missing (Cursor workspace launcher): ${soft_missing[*]}"
   yellow "    cursor:  install the 'cursor' CLI helper from Cursor → Command Palette → 'Shell Command'"
 else
-  green "  soft deps: lazygit cursor ✓"
+  green "  soft deps: cursor ✓"
 fi
 
 # 2. work root
