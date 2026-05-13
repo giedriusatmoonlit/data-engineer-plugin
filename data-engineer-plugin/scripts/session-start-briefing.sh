@@ -27,30 +27,37 @@ set -euo pipefail
 # the hook to break a session — every failure path exits 0.
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
+# Dispatch by worktree shape:
+#   *-pr-NNNN   → pr-status.sh PR-NNNN
+#   *-dat-NNN   → issue-status.sh DAT-NNN
 PR_NUM=""
+DAT_NUM=""
 if [[ "$PWD" =~ -pr-([0-9]+)(/|$) ]]; then
   PR_NUM="${BASH_REMATCH[1]}"
+elif [[ "$PWD" =~ -dat-([0-9]+)(/|$) ]]; then
+  DAT_NUM="${BASH_REMATCH[1]}"
 fi
 
-# Fallback: maybe Claude was launched from outside the worktree but the
-# mprocs proc name is set (each launch-pr-batch.sh proc gets MPROCS_NAME
-# = PR-NNNN injected into its env).
-if [ -z "$PR_NUM" ] && [ -n "${MPROCS_NAME:-}" ]; then
+# Fallback: mprocs proc name (e.g. each launch-pr-batch.sh proc gets
+# MPROCS_NAME = PR-NNNN injected into its env).
+if [ -z "$PR_NUM" ] && [ -z "$DAT_NUM" ] && [ -n "${MPROCS_NAME:-}" ]; then
   if [[ "$MPROCS_NAME" =~ ^PR-([0-9]+)$ ]]; then
     PR_NUM="${BASH_REMATCH[1]}"
+  elif [[ "$MPROCS_NAME" =~ ^DAT-([0-9]+)$ ]]; then
+    DAT_NUM="${BASH_REMATCH[1]}"
   fi
 fi
 
-[ -z "$PR_NUM" ] && exit 0
+[ -z "$PR_NUM" ] && [ -z "$DAT_NUM" ] && exit 0
 
-# DATA_ENG_WORK_ROOT must be set for pr-status.sh to work. If it's not,
-# print a tiny one-liner so the developer knows why they didn't get the
-# usual briefing.
 if [ -z "${DATA_ENG_WORK_ROOT:-}" ]; then
-  echo "(data-engineer-plugin · DATA_ENG_WORK_ROOT not set — no PR briefing)"
+  echo "(data-engineer-plugin · DATA_ENG_WORK_ROOT not set — no briefing)"
   exit 0
 fi
 
-# Invoke the briefing. Capture its exit code but never propagate failure.
-bash "$SCRIPT_DIR/pr-status.sh" "PR-$PR_NUM" 2>&1 || true
+if [ -n "$PR_NUM" ]; then
+  bash "$SCRIPT_DIR/pr-status.sh" "PR-$PR_NUM" 2>&1 || true
+elif [ -n "$DAT_NUM" ]; then
+  bash "$SCRIPT_DIR/issue-status.sh" "DAT-$DAT_NUM" 2>&1 || true
+fi
 exit 0

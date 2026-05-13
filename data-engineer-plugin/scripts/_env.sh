@@ -270,3 +270,73 @@ mprocs_allocate_port() {
 # ── now helpers ───────────────────────────────────────────────────────────────
 now_iso()    { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 now_epoch()  { date -u +%s; }
+
+# ── DAT issue helpers (parallel to PR helpers above) ──────────────────────────
+# Convention mirrors the worktree-manager skill:
+#   <worktree-parent>/<repo>-dat-<NNN>/.notes/{issue-state.json}
+#
+# Same in-tree-notes design as PR worktrees: notes live next to code,
+# `.git/info/exclude` keeps them out of commits.
+
+# Canonicalize: 612 | dat-612 | DAT-612 → "DAT-612"
+canonicalize_dat() {
+  local raw="$1"
+  raw="${raw#DAT-}"; raw="${raw#dat-}"
+  if [[ "$raw" =~ ^[0-9]+$ ]]; then
+    echo "DAT-$raw"
+  else
+    return 1
+  fi
+}
+
+require_dat_id() {
+  is_dat_id "$1" || die "Not a valid DAT id: '$1' (expected DAT-NNN or dat-NNN or NNN)"
+}
+
+dat_numeric()       { echo "${1#DAT-}"; }
+dat_numeric_lower() { echo "${1#DAT-}" | tr '[:upper:]' '[:lower:]'; }
+
+worktree_path_for_dat() {
+  local dat_id="$1"   # DAT-NNN
+  local repo
+  repo=$(basename "$(repo_root)")
+  [ -z "$repo" ] && die "Cannot resolve worktree path: neither DATA_ENG_REPO_ROOT nor SCRAPER_REPO_ROOT set"
+  echo "$(worktree_parent)/${repo}-dat-$(dat_numeric_lower "$dat_id")"
+}
+dat_worktree()     { worktree_path_for_dat "$1"; }
+dat_dir()          { echo "$(worktree_path_for_dat "$1")/.notes"; }
+dat_state_file()   { echo "$(dat_dir "$1")/issue-state.json"; }
+dat_cursor_rule()  { echo "$(worktree_path_for_dat "$1")/.cursor/rules/issue.md"; }
+
+# Initialize the .notes/ scratchpad + gitignore-exclude it. Same pattern as
+# init_pr_notes; lifted verbatim with DAT path resolvers.
+init_issue_notes() {
+  local dat_id="$1"
+  local wt
+  wt=$(worktree_path_for_dat "$dat_id")
+  [ -d "$wt" ] || die "init_issue_notes: worktree not on disk: $wt"
+  mkdir -p "$wt/.notes" "$wt/.cursor/rules"
+  local gitdir
+  gitdir=$(git -C "$wt" rev-parse --absolute-git-dir 2>/dev/null) || gitdir=""
+  if [ -n "$gitdir" ]; then
+    local exclude="$gitdir/info/exclude"
+    mkdir -p "$gitdir/info"
+    touch "$exclude"
+    if ! grep -qxF '.notes/' "$exclude" 2>/dev/null; then
+      printf '\n# data-engineer-plugin per-issue scratchpad\n.notes/\n' >> "$exclude"
+    fi
+    # .cursor/rules/ is intentionally NOT excluded — those rule files are
+    # convenient to commit IF the dev wants ticket-scoped rules to survive.
+    # We don't auto-commit them; the dev decides.
+  fi
+}
+
+# Detect a DAT id from a worktree-shaped path (.../<repo>-dat-NNN[/...]).
+# Used by issue-guard.sh.
+extract_dat_from_path() {
+  local p="$1"
+  if [[ "$p" =~ -dat-([0-9]+) ]]; then
+    echo "DAT-${BASH_REMATCH[1]}"; return
+  fi
+  echo ""
+}
