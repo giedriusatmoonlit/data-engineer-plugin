@@ -30,8 +30,8 @@ _session_id() {
     echo "$CLAUDE_SESSION_ID"
   elif [ -n "${DE_FAKE_SESSION_ID:-}" ]; then
     echo "$DE_FAKE_SESSION_ID"
-  elif [ -n "${TMUX_PANE:-}" ]; then
-    echo "tmux$(echo "$TMUX_PANE" | tr -c 'A-Za-z0-9' '_')"
+  elif [ -n "${MPROCS_NAME:-}" ]; then
+    echo "mprocs-$(printf '%s' "$MPROCS_NAME" | tr -c 'A-Za-z0-9' '_')"
   elif [ -n "${PPID:-}" ] && [ "$PPID" != "1" ]; then
     echo "ppid-$PPID"
   else

@@ -1,5 +1,5 @@
 ---
-description: Bulk PR-review-addressing orchestrator for Azure DevOps. Triages N PRs in parallel, then spawns one claude-squad session per PR running /fix-pr in its own worktree. Each session stops one step before push — no automated git push, no automated ADO comment replies. Sibling command to api-scraper's /batch-prep but PR-keyed.
+description: Bulk PR-review-addressing orchestrator for Azure DevOps. Triages N PRs in parallel, then spawns one mprocs window (hosted in wezterm) with one process per PR running /fix-pr in its own worktree. Each session stops one step before push — no automated git push, no automated ADO comment replies. Sibling command to api-scraper's /batch-prep but PR-keyed.
 argument-hint: <PR-NNNN|NNNN|#NNNN> [...] | --mine | --report <BATCH_ID> | --launch <BATCH_ID> [--force] | --status <PR>... | --no-launch | --dry-run <PR>... | --refresh <BATCH_ID>
 allowed-tools: Bash, Read, Write, Edit, Grep, Glob
 ---
@@ -7,8 +7,10 @@ allowed-tools: Bash, Read, Write, Edit, Grep, Glob
 # /data-engineer-plugin:address-pr
 
 Bulk PR onboarding for ADO PRs. Light orchestrator: for every input
-PR, creates a fresh worktree at `<repo>-pr-NNNN` and spawns a
-claude-squad session in it. Each spawned session then **self-triages**
+PR, creates a fresh worktree at `<repo>-pr-NNNN` and registers it as a
+process in a per-batch `mprocs.yaml`. Then opens one wezterm window
+running mprocs against that yaml — one process per PR, autostarted with
+`/data-engineer-plugin:fix-pr PR-NNNN`. Each spawned session then **self-triages**
 as Phase 0→1 of `/data-engineer-plugin:fix-pr` — fetches via `az`,
 filters threads by status, writes `.notes/pr_packet.json` (the az
 cache) and a flat `open_threads[]` array into `.notes/state.json`.
@@ -37,7 +39,7 @@ prepares everything; the developer pushes when they're ready.
 /data-engineer-plugin:address-pr --status PR-2299  # read-only snapshot
 /data-engineer-plugin:address-pr --report <PB_ID>  # re-render existing batch
 /data-engineer-plugin:address-pr --refresh <PB_ID> # re-fetch comments, append new ones
-/data-engineer-plugin:address-pr --launch <PB_ID>  # standalone: just spawn cs sessions
+/data-engineer-plugin:address-pr --launch <PB_ID>  # standalone: just spawn the mprocs window
 /data-engineer-plugin:address-pr --dry-run 2299 2301
 ```
 
@@ -45,10 +47,11 @@ Optional flags:
 
 ```
 --concurrency N        Override per-PR parallel fan-out cap (default 3)
---no-launch            Skip the cs-work spawn at the end. Default is to
-                       auto-spawn one cs instance per ready PR.
---force                With --launch, tear down existing tmux/cs entries
-                       for the batch's PRs and re-spawn fresh.
+--no-launch            Skip the wezterm/mprocs spawn at the end. Default is
+                       to auto-spawn one mprocs proc per ready PR.
+--force                With --launch, ignored for now (each batch gets a
+                       fresh mprocs.yaml; respawn-proc.sh handles per-PR
+                       restarts).
 ```
 
 ## Two phases per PR (set by /fix-pr)
@@ -56,7 +59,7 @@ Optional flags:
 | Phase | Done by                          | What | Gate                                              |
 |-------|----------------------------------|------|---------------------------------------------------|
 | 0→1   | spawned pane (not this command)  | TRIAGE: pr_packet.json + state.open_threads[]    | every active thread listed in open_threads        |
-| 1→2   | /fix-pr in cs pane               | ADDRESS: per-thread decisions + commits (when applied) | every open_threads entry has a decision; tree clean |
+| 1→2   | /fix-pr in mprocs proc           | ADDRESS: per-thread decisions + commits (when applied) | every open_threads entry has a decision; tree clean |
 
 After phase 2, the developer (human) pushes + replies on ADO using
 the in-chat end-of-ADDRESS summary. `fix-pr` never automates those.
@@ -70,11 +73,13 @@ Before any work:
    - `$DATA_ENG_REPO_ROOT` OR `$SCRAPER_REPO_ROOT` set and a directory
    - `$ADO_ORG` + `$ADO_PROJECT` set, OR `az devops configure --list`
      already has `organization` + `project` defaults
-2. **Hard deps**: `az`, `jq`, `tmux`, `git` on PATH. `az account show`
-   succeeds (otherwise instruct the user to `az login` / paste a PAT).
-3. **Auto-spawn deps** (only if `--no-launch` not passed): `claude-squad`
-   (`cs`) installed. If absent, warn but still write the packets — the
-   developer can spawn manually.
+2. **Hard deps**: `az`, `jq`, `git`, `wezterm`, `mprocs` on PATH.
+   `az account show` succeeds (otherwise instruct the user to `az login`
+   / paste a PAT).
+3. **Auto-spawn deps** (only if `--no-launch` not passed): `wezterm` and
+   `mprocs` already verified above. If `wezterm` can't open a GUI window
+   in this session (e.g. headless), warn but still write `mprocs.yaml` —
+   the developer can run `mprocs --config <batch>/mprocs.yaml` manually.
 4. **`$DATA_ENG_WORK_ROOT/pr_notes/_batch/` writable** — create it if missing.
 5. **At least one PR resolved**.
 
@@ -121,14 +126,17 @@ Before any work:
      ]
    }
    ```
-7. **Auto-spawn cs sessions** unless `--no-launch`:
+7. **Auto-spawn the mprocs window** unless `--no-launch`:
    ```bash
    bash "${CLAUDE_PLUGIN_ROOT}/scripts/launch-pr-batch.sh" "$BATCH_ID"
    ```
-   The launcher creates the worktrees (`<repo>-pr-NNNN`), spawns tmux
-   sessions, queues `/data-engineer-plugin:fix-pr PR-NNNN`, writes
-   cs state.json entries, and prints attach instructions + Cursor
-   workspace path.
+   The launcher creates the worktrees (`<repo>-pr-NNNN`), writes a
+   per-batch `mprocs.yaml` (one proc per PR with `cmd: [bash, -lc, exec
+   claude "/data-engineer-plugin:fix-pr PR-NNNN"]`), pre-accepts the
+   per-worktree trust dialog in `~/.claude.json`, then spawns one
+   wezterm window running `mprocs --config <BATCH>/mprocs.yaml`. The
+   batch's TCP control port lands in `<BATCH>/mprocs.port` so
+   `respawn-proc.sh` can talk to the running server later.
 
 ### `--status <PR>...`
 
@@ -159,8 +167,8 @@ Diff against the cached `pr_packet.json`:
 
 Skip preflight #1–#5 except env-var checks. Run only
 `bash $CLAUDE_PLUGIN_ROOT/scripts/launch-pr-batch.sh <BATCH_ID>`.
-With `--force`, the launcher tears down existing tmux + cs entries for
-that batch's PRs before re-spawning.
+For per-PR restarts after a dead proc, use
+`bash $CLAUDE_PLUGIN_ROOT/scripts/respawn-proc.sh PR-NNNN`.
 
 ### `--dry-run`
 

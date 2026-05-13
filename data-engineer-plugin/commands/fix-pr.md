@@ -1,5 +1,5 @@
 ---
-description: Per-PR in-session command. Walks one ADO PR through two phases — triage comments → consultative per-thread address loop. Stops before push and before any ADO comment reply. Spawned automatically by /address-pr into each cs-work pane; can also be run directly.
+description: Per-PR in-session command. Walks one ADO PR through two phases — triage comments → consultative per-thread address loop. Stops before push and before any ADO comment reply. Spawned automatically by /address-pr into each mprocs proc; can also be run directly.
 argument-hint: <PR-NNNN|NNNN|#NNNN> [--refresh]
 allowed-tools: Bash, Read, Write, Edit, Grep, Glob
 ---
@@ -46,9 +46,9 @@ Before any phase work:
 3. **State** — read `<worktree>/.notes/state.json`. If missing, abort with:
    > Run /data-engineer-plugin:address-pr <PR_ID> first — no triage
    > packet yet.
-   You're already cd'd into the worktree (the launcher set the tmux
-   session's working dir to the worktree), so `.notes/state.json`
-   resolves relative.
+   You're already cd'd into the worktree (the launcher set the mprocs
+   proc's `cwd` to the worktree), so `.notes/state.json` resolves
+   relative.
 4. **Worktree** — `state.worktree_path` must exist on disk. If not,
    abort with the restore instructions (see "Worktree missing" below).
 5. **Branch** — confirm the worktree is on `state.source_branch`. If
@@ -357,7 +357,7 @@ If `state.worktree_path` doesn't exist on disk:
 
 ```
 Worktree for <PR_ID> is gone. fix-pr won't recreate it inline.
-Run this in your master cs-work session:
+Run this in your master claude session:
 
   /data-engineer-plugin:address-pr --launch <BATCH_ID>
 

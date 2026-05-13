@@ -32,11 +32,11 @@ if [[ "$PWD" =~ -pr-([0-9]+)(/|$) ]]; then
   PR_NUM="${BASH_REMATCH[1]}"
 fi
 
-# Fallback: maybe Claude was launched from outside the worktree but with
-# tmux session name = claudesquad_PR-NNNN. Check that next.
-if [ -z "$PR_NUM" ] && [ -n "${TMUX:-}" ]; then
-  TMUX_NAME=$(tmux display-message -p '#S' 2>/dev/null || echo "")
-  if [[ "$TMUX_NAME" =~ ^claudesquad_PR-([0-9]+)$ ]]; then
+# Fallback: maybe Claude was launched from outside the worktree but the
+# mprocs proc name is set (each launch-pr-batch.sh proc gets MPROCS_NAME
+# = PR-NNNN injected into its env).
+if [ -z "$PR_NUM" ] && [ -n "${MPROCS_NAME:-}" ]; then
+  if [[ "$MPROCS_NAME" =~ ^PR-([0-9]+)$ ]]; then
     PR_NUM="${BASH_REMATCH[1]}"
   fi
 fi

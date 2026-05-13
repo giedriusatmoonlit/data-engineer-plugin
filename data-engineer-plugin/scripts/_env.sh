@@ -190,13 +190,81 @@ session_id() {
     echo "$CLAUDE_SESSION_ID"
   elif [ -n "${DE_FAKE_SESSION_ID:-}" ]; then
     echo "$DE_FAKE_SESSION_ID"
-  elif [ -n "${TMUX_PANE:-}" ]; then
-    echo "tmux$(echo "$TMUX_PANE" | tr -c 'A-Za-z0-9' '_')"
+  elif [ -n "${MPROCS_NAME:-}" ]; then
+    echo "mprocs-$(printf '%s' "$MPROCS_NAME" | tr -c 'A-Za-z0-9' '_')"
   elif [ -n "${PPID:-}" ] && [ "$PPID" != "1" ]; then
     echo "ppid-$PPID"
   else
     echo "default"
   fi
+}
+
+# ── wezterm + mprocs helpers ──────────────────────────────────────────────────
+
+# Pre-accept the per-project "do you trust" dialog so a freshly-spawned
+# claude pane doesn't block on it. Idempotent. claude reads this map
+# from ~/.claude.json (NOT from $CLAUDE_CONFIG_DIR — the trust dialog
+# state is global to the user).
+ensure_trust_dialog_accepted() {
+  local project_path="$1"
+  local config="$HOME/.claude.json"
+  [ -d "$project_path" ] || return 0
+  [ -f "$config" ] || echo '{}' > "$config"
+  local tmp
+  tmp=$(mktemp)
+  jq --arg p "$project_path" \
+     '.projects = (.projects // {}) |
+      .projects[$p] = ((.projects[$p] // {}) + {hasTrustDialogAccepted: true})' \
+     "$config" > "$tmp" && mv "$tmp" "$config"
+}
+
+# Spawn a command in wezterm in a NEW GUI window.
+#
+# Preference order:
+#   1. wezterm-gui (direct GUI binary; bypasses mux-attach behavior of
+#      `wezterm start` when a mux-server is already running headless)
+#   2. wezterm cli spawn --new-window (when a wezterm GUI client is
+#      already attached to a running mux)
+#   3. wezterm start (last resort; may attach to mux without GUI)
+#
+# Usage: wezterm_spawn <cwd> <cmd-string>
+wezterm_spawn() {
+  local cwd="$1" cmd="$2"
+  if command -v wezterm-gui >/dev/null 2>&1; then
+    setsid -f wezterm-gui start --cwd "$cwd" -- bash -lc "$cmd" >/dev/null 2>&1 &
+    disown 2>/dev/null || true
+    return 0
+  fi
+  if command -v wezterm >/dev/null 2>&1 && wezterm cli list >/dev/null 2>&1; then
+    wezterm cli spawn --new-window --cwd "$cwd" -- bash -lc "$cmd"
+    return 0
+  fi
+  if command -v wezterm >/dev/null 2>&1; then
+    setsid -f wezterm start --cwd "$cwd" -- bash -lc "$cmd" >/dev/null 2>&1 &
+    disown 2>/dev/null || true
+    return 0
+  fi
+  red "wezterm not on PATH — cannot spawn. Install wezterm or run manually:"
+  red "  cd $cwd && $cmd"
+  return 1
+}
+
+# Allocate an ephemeral TCP port (for mprocs --server). Persists the
+# allocated port to $1 (file path) so respawn-proc.sh can reuse it.
+mprocs_allocate_port() {
+  local port_file="$1"
+  if [ -f "$port_file" ]; then
+    cat "$port_file"
+    return 0
+  fi
+  local port
+  port=$(python3 -c "import socket; s=socket.socket(); s.bind(('127.0.0.1',0)); print(s.getsockname()[1]); s.close()" 2>/dev/null)
+  if [ -z "$port" ] || ! [[ "$port" =~ ^[0-9]+$ ]]; then
+    # Fallback: random in 30000-40000 range. Will fail if collides.
+    port=$(( 30000 + RANDOM % 10000 ))
+  fi
+  echo "$port" > "$port_file"
+  echo "$port"
 }
 
 # ── now helpers ───────────────────────────────────────────────────────────────

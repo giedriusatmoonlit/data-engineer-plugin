@@ -25,10 +25,10 @@ set -euo pipefail
 # Fail-safe: if DATA_ENG_WORK_ROOT isn't set, we can't possibly be in
 # a /fix-pr session (every entry path exports it). Treat as "no lock
 # context" and exit 0 (= allow). This prevents the hook from bricking
-# a spawned pane just because tmux env propagation missed something.
-# The launcher passes the var explicitly with -e; this is the safety
-# net for resumed sessions, manual claude invocation in a worktree,
-# or any other edge case where env propagation broke.
+# a spawned pane just because env propagation missed something.
+# The launcher passes the var explicitly via mprocs.yaml's `env:` block;
+# this is the safety net for resumed sessions, manual claude invocation
+# in a worktree, or any other edge case where env propagation broke.
 if [ -z "${DATA_ENG_WORK_ROOT:-}" ]; then
   exit 0
 fi
@@ -38,8 +38,8 @@ _session_id() {
     echo "$CLAUDE_SESSION_ID"
   elif [ -n "${DE_FAKE_SESSION_ID:-}" ]; then
     echo "$DE_FAKE_SESSION_ID"
-  elif [ -n "${TMUX_PANE:-}" ]; then
-    echo "tmux$(echo "$TMUX_PANE" | tr -c 'A-Za-z0-9' '_')"
+  elif [ -n "${MPROCS_NAME:-}" ]; then
+    echo "mprocs-$(printf '%s' "$MPROCS_NAME" | tr -c 'A-Za-z0-9' '_')"
   elif [ -n "${PPID:-}" ] && [ "$PPID" != "1" ]; then
     echo "ppid-$PPID"
   else

@@ -2,7 +2,7 @@
 # data-engineer-plugin · install.sh
 #
 # Light installer:
-#   1. Verifies required tools (jq, tmux, git, az; cs + cursor soft)
+#   1. Verifies required tools (jq, git, az, wezterm, mprocs; lazygit + cursor soft)
 #   2. Creates $DATA_ENG_WORK_ROOT (default $HOME/.data-engineer-work)
 #      with pr_notes/ and pr_notes/_batch/ subdirs
 #   3. Prints recommended shell exports if any env vars are missing
@@ -28,27 +28,29 @@ cyan "── data-engineer-plugin install ──"
 # 1. tools
 hard_missing=()
 soft_missing=()
-for c in jq tmux git az; do
+for c in jq git az wezterm mprocs; do
   command -v "$c" >/dev/null 2>&1 || hard_missing+=("$c")
 done
-for c in cs cursor; do
+for c in lazygit cursor; do
   command -v "$c" >/dev/null 2>&1 || soft_missing+=("$c")
 done
 if [ ${#hard_missing[@]} -gt 0 ]; then
   red "Missing required tool(s): ${hard_missing[*]}"
-  red "  jq:    https://stedolan.github.io/jq/"
-  red "  tmux:  apt install tmux  /  brew install tmux"
-  red "  git:   ..."
-  red "  az:    https://docs.microsoft.com/cli/azure/install-azure-cli"
+  red "  jq:       https://stedolan.github.io/jq/"
+  red "  git:      apt install git"
+  red "  az:       https://docs.microsoft.com/cli/azure/install-azure-cli"
+  red "  wezterm:  https://wezterm.org/installation.html  (or the latest .deb from"
+  red "            https://github.com/wezterm/wezterm/releases)"
+  red "  mprocs:   https://github.com/pvolok/mprocs/releases  (drop the binary in ~/.local/bin)"
   exit 1
 fi
-green "  hard deps: jq tmux git az ✓"
+green "  hard deps: jq git az wezterm mprocs ✓"
 if [ ${#soft_missing[@]} -gt 0 ]; then
-  yellow "  soft deps missing (cs-work auto-spawn / Cursor workspace): ${soft_missing[*]}"
-  yellow "    cs:     https://github.com/smtg-ai/claude-squad"
-  yellow "    cursor: install the 'cursor' CLI helper from Cursor → Command Palette → 'Shell Command'"
+  yellow "  soft deps missing (multi-repo git UI / Cursor workspace): ${soft_missing[*]}"
+  yellow "    lazygit: https://github.com/jesseduffield/lazygit/releases"
+  yellow "    cursor:  install the 'cursor' CLI helper from Cursor → Command Palette → 'Shell Command'"
 else
-  green "  soft deps: cs cursor ✓"
+  green "  soft deps: lazygit cursor ✓"
 fi
 
 # 2. work root
@@ -101,7 +103,7 @@ fi
 # 5. plugin enable hint
 echo
 cyan "── plugin enable ──"
-echo "  In your master claude session (cs-work or bare claude), run:"
+echo "  In your master claude session, run:"
 echo "    /plugin marketplace add giedriusatmoonlit/data-engineer-plugin"
 echo "    /plugin install data-engineer-plugin@data-engineer-plugin"
 echo
